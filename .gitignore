@@ -16,3 +16,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+
+# A global Git ignore rule may exclude uv.lock.
+!uv.lock
