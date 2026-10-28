@@ -1,0 +1,18 @@
+# Generated load-test data and results
+fixture/
+setup.json
+*.csv
+*.csv_*
+*.log
+
+# Local configuration and generated Pulp secrets
+.env
+settings/*
+!settings/settings.py
+
+# Python tools
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
