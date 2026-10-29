@@ -34,7 +34,7 @@ services:
     image: python:3.12-slim
     command: ["python", "-m", "http.server", "8000", "--bind", "0.0.0.0", "--directory", "/fixture"]
     volumes:
-      - ./fixture:/fixture:ro,Z
+      - ./_results/${RUN_ID:-local001}/fixture:/fixture:ro,Z
     ports:
       - "127.0.0.1:${FIXTURE_PORT:-8000}:8000"
 

@@ -10,7 +10,7 @@ PULP_BASE_URL=${PULP_BASE_URL:-http://localhost:5001}
 PULP_USER=${PULP_USER:-admin}
 PULP_PASSWORD=${PULP_PASSWORD:-password}
 RUN_ID=${RUN_ID:-$(date +%s)}
-SETUP_JSON=${SETUP_JSON:-setup.json}
+SETUP_JSON=${SETUP_JSON:-_results/$RUN_ID/setup.json}
 PULP_BASE_URL=${PULP_BASE_URL%/}
 UPSTREAM_URL=${UPSTREAM_URL%/}/
 
@@ -81,6 +81,7 @@ for mode in staging normal; do
     fi
 done
 
+mkdir -p "$(dirname "$SETUP_JSON")"
 jq -n --argjson staging "$staging" --argjson normal "$normal" \
     '{staging:$staging,normal:$normal}' > "$SETUP_JSON"
 printf 'Wrote %s\n' "$SETUP_JSON"

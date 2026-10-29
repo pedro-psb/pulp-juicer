@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from locust import HttpUser, constant, task
+import gevent
+from locust import HttpUser, constant, events, task
 from locust.exception import StopUser
 
 
@@ -15,13 +16,29 @@ mode = os.environ.get("MODE", "staging")
 if mode not in {"staging", "normal"}:
     raise ValueError("MODE must be staging or normal")
 
-config = json.loads(Path(os.environ.get("SETUP_JSON", "setup.json")).read_text())
-manifest = json.loads(Path(os.environ.get("MANIFEST_JSON", "fixture/manifest.json")).read_text())
+results_dir = Path("_results") / os.environ.get("RUN_ID", "local001")
+config = json.loads(Path(os.environ.get("SETUP_JSON", results_dir / "setup.json")).read_text())
+manifest = json.loads(Path(os.environ.get("MANIFEST_JSON", results_dir / "fixture/manifest.json")).read_text())
 artifacts = manifest[mode]
 indices = itertools.count()
 distribution_url = config[mode]["base_url"].rstrip("/")
 if origin := os.environ.get("CONTENT_ORIGIN"):
     distribution_url = origin.rstrip("/") + urlsplit(distribution_url).path.rstrip("/")
+
+
+@events.init.add_listener
+def quit_when_complete(environment, **kwargs):
+    completed = 0
+
+    @environment.events.request.add_listener
+    def count_request(request_type, name, **kwargs):
+        nonlocal completed
+        if request_type != "GET" or name != f"pull-through/{mode}":
+            return
+        completed += 1
+        if completed == len(artifacts):
+            # Locust writes CSV snapshots once a second; keep the final sample.
+            gevent.spawn_later(1.1, environment.runner.quit)
 
 
 class PullThroughUser(HttpUser):

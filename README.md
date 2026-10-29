@@ -22,30 +22,43 @@ From this directory, set a run ID and start the services:
 export RUN_ID=run001
 make up COUNT=1000
 make status
-UPSTREAM_URL=http://fixture:8000/ ./setup_pulp.sh
-
-MODE=normal uv run --locked locust -f locustfile.py --headless -u 10 -r 10 -t 5m --csv normal
-MODE=staging uv run --locked locust -f locustfile.py --headless -u 10 -r 10 -t 5m --csv staging
+make setup
+make run MODE=normal
+make run MODE=staging
+make plot
 ```
 
-`make up` generates `fixture/` if needed and builds Pulp from the selected checkouts.
+`make up` generates `_results/$RUN_ID/fixture/` if needed and builds Pulp from the selected checkouts.
 Run it again after editing either checkout.
-`setup_pulp.sh` creates both repositories and distributions and writes their URLs to `setup.json`.
+`make setup` creates both repositories and distributions and writes their URLs to `_results/$RUN_ID/setup.json`.
+Locust CSV files and plots are written under the same run directory.
+Use `make run MODE=normal USERS=10 SPAWN_RATE=10 DURATION=5m WAIT_SECONDS=0` to adjust the load.
 Pulp defaults to `http://localhost:5001` with `admin:password`.
 
 Run one Locust mode at a time in a single process.
 Each process requests its artifacts once and checks HTTP 200 and SHA256.
+Locust exits after the last request completes; `DURATION` remains a time limit for incomplete runs.
 Response latency excludes the later commit.
 The autocommit delay defaults to 30 seconds and the scan interval to 5 seconds; set `STAGING_DELAY_SECONDS` and `STAGING_SCAN_SECONDS` before `make up` to change them.
 
 Check staging and committed versions after the run:
 
 ```bash
-repo=$(jq -r '.staging.repository' setup.json)
+repo=$(jq -r '.staging.repository' "_results/$RUN_ID/setup.json")
 curl -u admin:password "http://localhost:5001${repo}staging/" | jq '{count,results}'
 curl -u admin:password "http://localhost:5001${repo}versions/" | jq '{count,results:[.results[].number]}'
 ```
 
-Use a new run ID and fixture for each repeat so requests stay cold.
-To regenerate, remove `fixture/` and run `make fixture RUN_ID=run002`.
-`make down` keeps Pulp data; `make destroy` removes its named volumes but keeps the fixture and source checkouts.
+Use a new run ID for each repeat so requests stay cold.
+`make down` keeps Pulp data; `make destroy` removes its named volumes but keeps `_results/` and source checkouts.
+
+## How it works
+
+Normal pull-through adds each artifact to a repository version; staging collects artifacts until autocommit creates a version.
+
+- `Makefile`, `compose.yaml`, `Containerfile`, and `settings/` build and run Pulp and the fixture server.
+- `make_fixture.py` writes Maven artifacts and a manifest to `_results/$RUN_ID/fixture/`.
+- `setup_pulp.sh` creates the remote, both repositories, and their distributions, then writes `_results/$RUN_ID/setup.json`.
+- `locustfile.py` reads the manifest and setup file, requests each artifact once, and checks its checksum.
+- `plot_locust_results.py` writes comparison plots to `_results/$RUN_ID/plots/`.
+- `pyproject.toml` and `uv.lock` define the local Python tools.

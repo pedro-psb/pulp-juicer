@@ -1,4 +1,5 @@
 # Generated load-test data and results
+_results/
 fixture/
 setup.json
 *.csv
