@@ -1,7 +1,7 @@
 # Maven pull-through load test
 
 Compare cold pull-through requests against Maven repositories with staging and autocommit enabled or disabled.
-Each mode gets unique artifact paths and bytes.
+Each scenario gets unique artifact paths and bytes.
 
 ## Prerequisites
 
@@ -23,19 +23,25 @@ export RUN_ID=run001
 make up COUNT=1000
 make status
 make setup
-make run MODE=normal
-make run MODE=staging
+make run SCENARIO=normal
+make run SCENARIO=staging
 make plot
 ```
 
-`make up` generates `_results/$RUN_ID/fixture/` if needed and builds Pulp from the selected checkouts.
+`make up` generates the shared `fixture/` if needed and builds Pulp from the selected checkouts.
 Run it again after editing either checkout.
-`make setup` creates both repositories and distributions and writes their URLs to `_results/$RUN_ID/setup.json`.
-Locust CSV files and plots are written under the same run directory.
-Use `make run MODE=normal USERS=10 SPAWN_RATE=10 DURATION=5m WAIT_SECONDS=0` to adjust the load.
+BuildKit reuses its `uv` cache across regular rebuilds; `--no-cache` discards it.
+`make setup` creates both repositories and distributions and writes their URLs to `_results/_run/$RUN_ID/setup.json`.
+It waits up to five minutes for Pulp's database, workers, and content app; set `PULP_READY_TIMEOUT` to change the limit.
+Locust CSV files and a charted `report.html` are written under `_results/$SCENARIO/$RUN_ID/`.
+`make run` also records PostgreSQL CPU once per second in `db_cpu.csv` and writes `db_cpu_summary.csv` when Locust stops.
+CPU percent is summed across PostgreSQL processes, so 100% means one fully used CPU core.
+Comparison plots are written under `_results/_comparison/$RUN_ID/`.
+`COUNT`, `PAYLOAD_BYTES`, and `FIXTURE_ID` apply when `fixture/` is first generated.
+Use `make run SCENARIO=normal USERS=10 SPAWN_RATE=10 DURATION=5m WAIT_SECONDS=0` to adjust the load.
 Pulp defaults to `http://localhost:5001` with `admin:password`.
 
-Run one Locust mode at a time in a single process.
+Run one Locust scenario at a time in a single process.
 Each process requests its artifacts once and checks HTTP 200 and SHA256.
 Locust exits after the last request completes; `DURATION` remains a time limit for incomplete runs.
 Response latency excludes the later commit.
@@ -44,21 +50,24 @@ The autocommit delay defaults to 30 seconds and the scan interval to 5 seconds; 
 Check staging and committed versions after the run:
 
 ```bash
-repo=$(jq -r '.staging.repository' "_results/$RUN_ID/setup.json")
+repo=$(jq -r '.staging.repository' "_results/_run/$RUN_ID/setup.json")
 curl -u admin:password "http://localhost:5001${repo}staging/" | jq '{count,results}'
 curl -u admin:password "http://localhost:5001${repo}versions/" | jq '{count,results:[.results[].number]}'
 ```
 
-Use a new run ID for each repeat so requests stay cold.
-`make down` keeps Pulp data; `make destroy` removes its named volumes but keeps `_results/` and source checkouts.
+Reset Pulp with `make destroy` before repeating the test with a new run ID so the shared artifact paths stay cold.
+If you open a new shell, set the same `RUN_ID` again before running the next scenario.
+The earlier root-level `setup.json` belongs to the old layout.
+`make down` keeps Pulp data; `make destroy` removes its named volumes but keeps `fixture/`, `_results/`, and source checkouts.
+`make clean` removes `_results/` while keeping the shared fixture and Pulp volumes.
 
 ## How it works
 
 Normal pull-through adds each artifact to a repository version; staging collects artifacts until autocommit creates a version.
 
 - `Makefile`, `compose.yaml`, `Containerfile`, and `settings/` build and run Pulp and the fixture server.
-- `make_fixture.py` writes Maven artifacts and a manifest to `_results/$RUN_ID/fixture/`.
-- `setup_pulp.sh` creates the remote, both repositories, and their distributions, then writes `_results/$RUN_ID/setup.json`.
+- `make_fixture.py` writes Maven artifacts and a manifest to the shared `fixture/`.
+- `setup_pulp.sh` creates the remote, both repositories, and their distributions, then writes `_results/_run/$RUN_ID/setup.json`.
 - `locustfile.py` reads the manifest and setup file, requests each artifact once, and checks its checksum.
-- `plot_locust_results.py` writes comparison plots to `_results/$RUN_ID/plots/`.
+- `plot_locust_results.py` writes comparison plots to `_results/_comparison/$RUN_ID/`.
 - `pyproject.toml` and `uv.lock` define the local Python tools.

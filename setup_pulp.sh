@@ -9,8 +9,9 @@ done
 PULP_BASE_URL=${PULP_BASE_URL:-http://localhost:5001}
 PULP_USER=${PULP_USER:-admin}
 PULP_PASSWORD=${PULP_PASSWORD:-password}
+PULP_READY_TIMEOUT=${PULP_READY_TIMEOUT:-300}
 RUN_ID=${RUN_ID:-$(date +%s)}
-SETUP_JSON=${SETUP_JSON:-_results/$RUN_ID/setup.json}
+SETUP_JSON=${SETUP_JSON:-_results/_run/$RUN_ID/setup.json}
 PULP_BASE_URL=${PULP_BASE_URL%/}
 UPSTREAM_URL=${UPSTREAM_URL%/}/
 
@@ -20,6 +21,30 @@ api_url() {
         *) printf '%s%s\n' "$PULP_BASE_URL" "$1" ;;
     esac
 }
+
+wait_for_pulp() {
+    [[ "$PULP_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'PULP_READY_TIMEOUT must be a positive number of seconds\n' >&2
+        return 2
+    }
+    local status deadline url
+    url=$(api_url /pulp/api/v3/status/)
+    deadline=$((SECONDS + PULP_READY_TIMEOUT))
+    printf 'Waiting for Pulp at %s (up to %s seconds)\n' "$url" "$PULP_READY_TIMEOUT"
+    while :; do
+        if status=$(curl --silent --fail --connect-timeout 2 --max-time 3 "$url" 2>/dev/null) &&
+            jq -e '.database_connection.connected == true and (.online_workers | length) > 0 and (.online_content_apps | length) > 0' <<<"$status" >/dev/null 2>&1; then
+            printf 'Pulp is ready\n'
+            return 0
+        fi
+        (( SECONDS < deadline )) || break
+        sleep 2
+    done
+    printf 'Pulp was not ready within %s seconds at %s\n' "$PULP_READY_TIMEOUT" "$url" >&2
+    return 1
+}
+
+wait_for_pulp
 
 api() {
     local response
@@ -56,23 +81,23 @@ remote_body=$(jq -nc --arg name "loadtest-$RUN_ID" --arg url "$UPSTREAM_URL" \
     '{name:$name,url:$url}')
 remote_href=$(create /pulp/api/v3/remotes/maven/maven/ "$remote_body")
 
-for mode in staging normal; do
-    if [[ "$mode" == staging ]]; then
-        repo_body=$(jq -nc --arg name "loadtest-$RUN_ID-$mode" \
+for scenario in staging normal; do
+    if [[ "$scenario" == staging ]]; then
+        repo_body=$(jq -nc --arg name "loadtest-$RUN_ID-$scenario" \
             '{name:$name,staging_enabled:true,staging_autocommit:true}')
     else
-        repo_body=$(jq -nc --arg name "loadtest-$RUN_ID-$mode" \
+        repo_body=$(jq -nc --arg name "loadtest-$RUN_ID-$scenario" \
             '{name:$name,staging_enabled:false,staging_autocommit:false}')
     fi
     repo_href=$(create /pulp/api/v3/repositories/maven/maven/ "$repo_body")
-    distro_body=$(jq -nc --arg name "loadtest-$RUN_ID-$mode" \
-        --arg base_path "loadtest-$RUN_ID-$mode" --arg remote "$remote_href" \
+    distro_body=$(jq -nc --arg name "loadtest-$RUN_ID-$scenario" \
+        --arg base_path "loadtest-$RUN_ID-$scenario" --arg remote "$remote_href" \
         --arg repository "$repo_href" \
         '{name:$name,base_path:$base_path,remote:$remote,repository:$repository}')
     distro_href=$(create /pulp/api/v3/distributions/maven/maven/ "$distro_body")
     distro=$(api "$(api_url "$distro_href")")
     base_url=$(jq -er '.base_url' <<<"$distro")
-    if [[ "$mode" == staging ]]; then
+    if [[ "$scenario" == staging ]]; then
         staging=$(jq -nc --arg repo "$repo_href" --arg distro "$distro_href" \
             --arg base "$base_url" '{repository:$repo,distribution:$distro,base_url:$base}')
     else

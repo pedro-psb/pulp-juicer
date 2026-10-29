@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot two Locust pull-through runs using only the Python standard library."""
+"""Plot two pull-through scenarios from one run using only the Python standard library."""
 
 import argparse
 import csv
@@ -13,10 +13,13 @@ LEFT, RIGHT, TOP, BOTTOM = 90, 40, 88, 76
 PLOT_W, PLOT_H = WIDTH - LEFT - RIGHT, HEIGHT - TOP - BOTTOM
 
 
-def read_run(directory, name):
-    with (directory / f"{name}_stats.csv").open(newline="") as source:
-        stats = next(row for row in csv.DictReader(source) if row["Name"] == f"pull-through/{name}")
-    with (directory / f"{name}_stats_history.csv").open(newline="") as source:
+def read_scenario(directory, run_id, scenario):
+    scenario_dir = directory / scenario / run_id
+    stats_path = scenario_dir / "locust_stats.csv"
+    history_path = scenario_dir / "locust_stats_history.csv"
+    with stats_path.open(newline="") as source:
+        stats = next(row for row in csv.DictReader(source) if row["Name"] == f"pull-through/{scenario}")
+    with history_path.open(newline="") as source:
         history = [row for row in csv.DictReader(source) if row["Name"] == "Aggregated"]
     total = int(stats["Request Count"])
     start = int(history[0]["Timestamp"])
@@ -26,7 +29,7 @@ def read_run(directory, name):
         if active[-1][1] >= total:
             break
     if not active or active[-1][1] != total:
-        raise ValueError(f"{name}: history does not contain all {total} requests")
+        raise ValueError(f"{scenario}: history does not contain all {total} requests")
     return {"stats": stats, "active": active}
 
 
@@ -75,21 +78,21 @@ def save(parts, output):
     output.write_text("\n".join(parts + ["</svg>"]) + "\n")
 
 
-def plot_completed(runs, output):
-    parts = svg_start("Cold pull-through: completed requests", "1,000 distinct Maven artifacts per mode · 10 users · zero think time")
-    limit = max(points["active"][-1][0] for points in runs.values())
+def plot_completed(scenarios, output):
+    parts = svg_start("Cold pull-through: completed requests", "Distinct Maven artifacts per scenario · active request window")
+    limit = max(points["active"][-1][0] for points in scenarios.values())
     xy = axes(parts, 30 if limit <= 30 else limit, 1000, "Seconds from Locust start", "Completed requests", range(0, limit + 1, 5), range(0, 1001, 200))
-    for name, data in runs.items():
-        line(parts, data["active"], COLORS[name], xy)
+    for scenario, data in scenarios.items():
+        line(parts, data["active"], COLORS[scenario], xy)
     legend(parts)
     save(parts, output)
 
 
-def plot_throughput(runs, output):
+def plot_throughput(scenarios, output):
     series = {}
-    for name, data in runs.items():
+    for scenario, data in scenarios.items():
         active = data["active"]
-        series[name] = [(now[0], now[1] - previous[1]) for previous, now in zip(active, active[1:])]
+        series[scenario] = [(now[0], now[1] - previous[1]) for previous, now in zip(active, active[1:])]
     limit = max(points[-1][0] for points in series.values())
     ceiling = ((max(y for points in series.values() for _, y in points) + 9) // 10) * 10
     parts = svg_start("Cold pull-through: request throughput", "Completed requests per 1-second history interval; active request window only")
@@ -100,7 +103,7 @@ def plot_throughput(runs, output):
     save(parts, output)
 
 
-def plot_latency(runs, output):
+def plot_latency(scenarios, output):
     percentiles = ["50%", "90%", "95%", "99%"]
     ceiling = 600
     parts = svg_start("Cold pull-through: response time", "Locust summary percentiles; HTTP response latency excludes the later autocommit")
@@ -108,13 +111,13 @@ def plot_latency(runs, output):
     for index, percentile in enumerate(percentiles, 1):
         x = LEFT + PLOT_W * index / 5
         parts.append(f'<text x="{x:.1f}" y="{HEIGHT-BOTTOM+23}" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#566176">p{percentile[:-1]}</text>')
-    for name, data in runs.items():
+    for scenario, data in scenarios.items():
         values = [(index, float(data["stats"][percentile])) for index, percentile in enumerate(percentiles, 1)]
-        line(parts, values, COLORS[name], xy)
+        line(parts, values, COLORS[scenario], xy)
         for xval, value in values:
             x, y = xy(xval, value)
-            offset = -11 if name == "normal" else 19
-            parts.append(f'<text x="{x:.1f}" y="{y+offset:.1f}" text-anchor="middle" font-family="sans-serif" font-size="12" fill="{COLORS[name]}">{value:g}</text>')
+            offset = -11 if scenario == "normal" else 19
+            parts.append(f'<text x="{x:.1f}" y="{y+offset:.1f}" text-anchor="middle" font-family="sans-serif" font-size="12" fill="{COLORS[scenario]}">{value:g}</text>')
     legend(parts)
     save(parts, output)
 
@@ -122,16 +125,17 @@ def plot_latency(runs, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path("."))
+    parser.add_argument("--run-id", required=True)
     parser.add_argument("--output", type=Path, default=Path("plots"))
     args = parser.parse_args()
-    runs = {name: read_run(args.input, name) for name in ("normal", "staging")}
+    scenarios = {scenario: read_scenario(args.input, args.run_id, scenario) for scenario in ("normal", "staging")}
     args.output.mkdir(parents=True, exist_ok=True)
-    plot_completed(runs, args.output / "completed_requests.svg")
-    plot_throughput(runs, args.output / "throughput.svg")
-    plot_latency(runs, args.output / "response_time.svg")
-    for name, data in runs.items():
+    plot_completed(scenarios, args.output / "completed_requests.svg")
+    plot_throughput(scenarios, args.output / "throughput.svg")
+    plot_latency(scenarios, args.output / "response_time.svg")
+    for scenario, data in scenarios.items():
         stats = data["stats"]
-        print(f"{name}: {stats['Request Count']} requests, {stats['Failure Count']} failures, "
+        print(f"{scenario}: {stats['Request Count']} requests, {stats['Failure Count']} failures, "
               f"{stats['Requests/s']} requests/s, {float(stats['Average Response Time']):.1f} ms mean")
 
 
