@@ -30,17 +30,19 @@ wait_for_pulp() {
     local status deadline url
     url=$(api_url /pulp/api/v3/status/)
     deadline=$((SECONDS + PULP_READY_TIMEOUT))
-    printf 'Waiting for Pulp at %s (up to %s seconds)\n' "$url" "$PULP_READY_TIMEOUT"
+    printf 'Waiting for Pulp at %s (up to %s s)\n' "$url" "$PULP_READY_TIMEOUT"
     while :; do
         if status=$(curl --silent --fail --connect-timeout 2 --max-time 3 "$url" 2>/dev/null) &&
             jq -e '.database_connection.connected == true and (.online_workers | length) > 0 and (.online_content_apps | length) > 0' <<<"$status" >/dev/null 2>&1; then
-            printf 'Pulp is ready\n'
+            printf ' ready\n'
             return 0
         fi
+        printf '.'
         (( SECONDS < deadline )) || break
         sleep 2
     done
-    printf 'Pulp was not ready within %s seconds at %s\n' "$PULP_READY_TIMEOUT" "$url" >&2
+    printf '\n'
+    printf 'Pulp was not ready within %s s at %s\n' "$PULP_READY_TIMEOUT" "$url" >&2
     return 1
 }
 

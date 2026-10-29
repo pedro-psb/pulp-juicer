@@ -1,15 +1,19 @@
 """Request each Maven artifact once through a Pulp pull-through distribution."""
 
+import csv
 import hashlib
 import itertools
 import json
+import math
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import gevent
 from locust import HttpUser, constant, events, task
 from locust.exception import StopUser
+from locust.stats import update_stats_history
 
 from db_cpu_monitor import DBCpuMonitor
 
@@ -30,6 +34,52 @@ if origin := os.environ.get("CONTENT_ORIGIN"):
     distribution_url = origin.rstrip("/") + urlsplit(distribution_url).path.rstrip("/")
 
 db_cpu_monitor = None
+request_log = None
+request_writer = None
+idle_seconds = float(os.environ.get("IDLE_SECONDS", "5"))
+tail_seconds = float(os.environ.get("TAIL_SECONDS", "5"))
+if any(not math.isfinite(value) or value < 0 for value in (idle_seconds, tail_seconds)):
+    raise ValueError("IDLE_SECONDS and TAIL_SECONDS must be non-negative finite numbers")
+
+
+@events.test_start.add_listener
+def start_request_log(environment, **kwargs):
+    global request_log, request_writer
+    if output := os.environ.get("REQUESTS_CSV"):
+        path = Path(output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        request_log = path.open("w", newline="")
+        request_writer = csv.writer(request_log)
+        request_writer.writerow((
+            "started_at_utc", "completed_at_utc", "artifact_path", "url",
+            "response_time_ms", "status_code", "response_bytes", "success", "error",
+        ))
+
+
+@events.request.add_listener
+def record_request(request_type, name, response_time, response, exception, start_time, url, context, response_length, **kwargs):
+    if request_writer is None or request_type != "GET" or name != f"pull-through/{scenario}":
+        return
+    request_writer.writerow((
+        datetime.fromtimestamp(start_time, timezone.utc).isoformat(timespec="microseconds"),
+        datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        (context or {}).get("artifact_path", ""),
+        url,
+        f"{response_time:.3f}",
+        response.status_code if response is not None else "",
+        response_length,
+        exception is None,
+        str(exception) if exception is not None else "",
+    ))
+
+
+@events.test_stop.add_listener
+def stop_request_log(environment, **kwargs):
+    global request_log, request_writer
+    if request_log is not None:
+        request_log.close()
+        request_log = None
+        request_writer = None
 
 
 @events.test_start.add_listener
@@ -48,11 +98,19 @@ def start_db_cpu(environment, **kwargs):
             environment.process_exit_code = 2
             gevent.spawn(environment.runner.quit)
             raise
+    if idle_seconds:
+        update_stats_history(environment.runner)
+        gevent.sleep(idle_seconds)
+        update_stats_history(environment.runner)
 
 
 @events.test_stop.add_listener
 def stop_db_cpu(environment, **kwargs):
     global db_cpu_monitor
+    if tail_seconds and environment.process_exit_code in (None, 0):
+        update_stats_history(environment.runner)
+        gevent.sleep(tail_seconds)
+        update_stats_history(environment.runner)
     if db_cpu_monitor is not None:
         try:
             db_cpu_monitor.stop()
@@ -74,8 +132,7 @@ def quit_when_complete(environment, **kwargs):
             return
         completed += 1
         if completed == len(artifacts):
-            # Locust writes CSV snapshots once a second; keep the final sample.
-            gevent.spawn_later(1.1, environment.runner.quit)
+            gevent.spawn(environment.runner.quit)
 
 
 class PullThroughUser(HttpUser):
@@ -92,6 +149,7 @@ class PullThroughUser(HttpUser):
         with self.client.get(
             f"{distribution_url}/{artifact['path']}",
             name=f"pull-through/{scenario}",
+            context={"artifact_path": artifact["path"]},
             catch_response=True,
             timeout=60,
         ) as response:

@@ -96,5 +96,5 @@ class DBCpuMonitor:
             writer = csv.writer(destination)
             writer.writerow(("phase", "duration_s", "postgres_cpu_seconds", "postgres_cpu_mean_pct", "postgres_cpu_peak_pct", "samples"))
             writer.writerow(
-                ("requests", f"{duration:.3f}", f"{cpu_seconds:.4f}", f"{cpu_seconds / duration * 100:.2f}" if duration else "0.00", f"{peak:.2f}", len(rows))
+                ("run", f"{duration:.3f}", f"{cpu_seconds:.4f}", f"{cpu_seconds / duration * 100:.2f}" if duration else "0.00", f"{peak:.2f}", len(rows))
             )

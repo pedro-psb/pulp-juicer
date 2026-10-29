@@ -9,3 +9,8 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+report = [
+    "quarto-cli==1.10.19",
+]

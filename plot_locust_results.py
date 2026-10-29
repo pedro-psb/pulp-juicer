@@ -26,8 +26,6 @@ def read_scenario(directory, run_id, scenario):
     active = []
     for row in history:
         active.append((int(row["Timestamp"]) - start, int(row["Total Request Count"])))
-        if active[-1][1] >= total:
-            break
     if not active or active[-1][1] != total:
         raise ValueError(f"{scenario}: history does not contain all {total} requests")
     return {"stats": stats, "active": active}
@@ -79,7 +77,7 @@ def save(parts, output):
 
 
 def plot_completed(scenarios, output):
-    parts = svg_start("Cold pull-through: completed requests", "Distinct Maven artifacts per scenario · active request window")
+    parts = svg_start("Cold pull-through: completed requests", "Distinct Maven artifacts per scenario · idle and tail included")
     limit = max(points["active"][-1][0] for points in scenarios.values())
     xy = axes(parts, 30 if limit <= 30 else limit, 1000, "Seconds from Locust start", "Completed requests", range(0, limit + 1, 5), range(0, 1001, 200))
     for scenario, data in scenarios.items():
@@ -95,7 +93,7 @@ def plot_throughput(scenarios, output):
         series[scenario] = [(now[0], now[1] - previous[1]) for previous, now in zip(active, active[1:])]
     limit = max(points[-1][0] for points in series.values())
     ceiling = ((max(y for points in series.values() for _, y in points) + 9) // 10) * 10
-    parts = svg_start("Cold pull-through: request throughput", "Completed requests per 1-second history interval; active request window only")
+    parts = svg_start("Cold pull-through: request throughput", "Completed requests per 1-second history interval; idle and tail included")
     xy = axes(parts, 30 if limit <= 30 else limit, ceiling, "Seconds from Locust start", "Requests per second", range(0, limit + 1, 5), range(0, ceiling + 1, 10))
     for name, points in series.items():
         line(parts, points, COLORS[name], xy)
