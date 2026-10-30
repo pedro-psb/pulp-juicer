@@ -83,23 +83,23 @@ remote_body=$(jq -nc --arg name "loadtest-$RUN_ID" --arg url "$UPSTREAM_URL" \
     '{name:$name,url:$url}')
 remote_href=$(create /pulp/api/v3/remotes/maven/maven/ "$remote_body")
 
-for scenario in staging normal; do
-    if [[ "$scenario" == staging ]]; then
-        repo_body=$(jq -nc --arg name "loadtest-$RUN_ID-$scenario" \
+for candidate in staging normal; do
+    if [[ "$candidate" == staging ]]; then
+        repo_body=$(jq -nc --arg name "loadtest-$RUN_ID-$candidate" \
             '{name:$name,staging_enabled:true,staging_autocommit:true}')
     else
-        repo_body=$(jq -nc --arg name "loadtest-$RUN_ID-$scenario" \
+        repo_body=$(jq -nc --arg name "loadtest-$RUN_ID-$candidate" \
             '{name:$name,staging_enabled:false,staging_autocommit:false}')
     fi
     repo_href=$(create /pulp/api/v3/repositories/maven/maven/ "$repo_body")
-    distro_body=$(jq -nc --arg name "loadtest-$RUN_ID-$scenario" \
-        --arg base_path "loadtest-$RUN_ID-$scenario" --arg remote "$remote_href" \
+    distro_body=$(jq -nc --arg name "loadtest-$RUN_ID-$candidate" \
+        --arg base_path "loadtest-$RUN_ID-$candidate" --arg remote "$remote_href" \
         --arg repository "$repo_href" \
         '{name:$name,base_path:$base_path,remote:$remote,repository:$repository}')
     distro_href=$(create /pulp/api/v3/distributions/maven/maven/ "$distro_body")
     distro=$(api "$(api_url "$distro_href")")
     base_url=$(jq -er '.base_url' <<<"$distro")
-    if [[ "$scenario" == staging ]]; then
+    if [[ "$candidate" == staging ]]; then
         staging=$(jq -nc --arg repo "$repo_href" --arg distro "$distro_href" \
             --arg base "$base_url" '{repository:$repo,distribution:$distro,base_url:$base}')
     else

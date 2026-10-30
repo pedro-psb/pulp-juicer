@@ -1,4 +1,4 @@
-"""Render one Quarto report containing all completed scenario runs."""
+"""Render one Quarto report containing all completed candidate runs."""
 
 import argparse
 import csv
@@ -23,6 +23,10 @@ def number(row, key, suffix="", digits=1):
         return f"{float(value):,.{digits}f}{suffix}"
     except (TypeError, ValueError):
         return value or "N/A"
+
+
+def markdown_value(value):
+    return html.escape(str(value)).replace("|", "&#124;").replace("\n", " ")
 
 
 def chart(path, title, y_label, points, color, minimum_y=1, overlay=None, overlay_label="Active users", request_starts=None):
@@ -121,16 +125,20 @@ def request_starts_per_second(rows, timeline_start, timeline_end):
 
 
 def prepare_run(run_dir, results_dir):
-    scenario, run_id = run_dir.parent.name, run_dir.name
+    candidate, run_id = run_dir.parent.name, run_dir.name
     def asset(name):
         return f"{run_dir.relative_to(results_dir).as_posix()}/{name}"
+    metadata_path = run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else None
+    history_path = run_dir / "locust_stats_history.csv"
+    history = [row for row in read_csv(history_path) if row["Name"] == "Aggregated"] if history_path.is_file() else []
     stats_rows = read_csv(run_dir / "locust_stats.csv")
     stats = next((row for row in stats_rows if row["Name"] == "Aggregated"), None)
     if stats is None:
         raise ValueError(f"No aggregated Locust stats in {run_dir}")
 
     lines = [
-        f"Scenario: **{scenario}**. Run: **{run_id}**.",
+        f"Candidate: **{candidate}**. Run: **{run_id}**.",
         "",
         "### Summary",
         "",
@@ -149,12 +157,52 @@ def prepare_run(run_dir, results_dir):
         "Response time covers the HTTP request; later autocommit is excluded.",
         "",
     ]
+    if metadata:
+        fixture = metadata["fixture"]
+        load = metadata["load"]
+        lines += [
+            "#### Run configuration",
+            "",
+            "| Setting | Value |",
+            "|:--|:--|",
+            f'| Fixture COUNT (artifacts for candidate) | {fixture["count"]} |',
+            f'| Fixture ID requested at setup | {markdown_value(fixture["requested_fixture_id"])} |',
+            f'| Payload bytes requested at setup | {fixture["requested_payload_bytes"]} |',
+            f'| Concurrent users (configured) | {load["users"]} |',
+            f'| Peak active users (observed) | {max(int(row["User Count"]) for row in history) if history else "N/A"} |',
+            f'| Spawn rate | {load["spawn_rate"]} users/s |',
+            f'| Maximum duration | {markdown_value(load["duration"])} |',
+            f'| Wait between requests | {load["wait_seconds"]} s |',
+            f'| Idle before load | {load["idle_seconds"]} s |',
+            f'| Tail after load | {load["tail_seconds"]} s |',
+            f'| Distribution URL | {markdown_value(metadata["setup"]["base_url"])} |',
+            f'| Upstream URL | {markdown_value(metadata["upstream_url"])} |',
+            f'| Docker Compose project | {markdown_value(metadata["project"])} |',
+            f'| Fixture SHA256 | {fixture["manifest_sha256"]} |',
+            "",
+            "#### Software sources",
+            "",
+            "| Component | Source | Git commit or ref | Local changes |",
+            "|:--|:--|:--|:--|",
+        ]
+        for name, source in metadata["sources"].items():
+            dirty = source["dirty"]
+            changes = "N/A" if dirty is None else "Yes" if dirty else "No"
+            lines.append(
+                f'| {markdown_value(name)} | {markdown_value(source["source"])} | '
+                f'{markdown_value(source["revision"])} | {changes} |'
+            )
+        lines.append("")
+        if fixture["requested_count"] != fixture["count"]:
+            lines += [
+                f'The fixture already existed at setup: COUNT={fixture["requested_count"]} was requested, '
+                f'and {fixture["count"]} artifacts were available for this candidate.',
+                "",
+            ]
     timeline = ["### Timeline", ""]
     completed_timestamps = []
 
-    history_path = run_dir / "locust_stats_history.csv"
     if history_path.is_file():
-        history = [row for row in read_csv(history_path) if row["Name"] == "Aggregated"]
         if history:
             start = int(history[0]["Timestamp"])
             completed_timestamps = [(int(row["Timestamp"]), int(row["Total Request Count"])) for row in history]
@@ -232,6 +280,9 @@ def prepare_run(run_dir, results_dir):
     lines += timeline
     lines += ["### Source files", ""]
     for name, label in (
+        ("run_metadata.json", "Run configuration and source commits or refs"),
+        ("manifest.json", "Fixture manifest used for this run"),
+        ("setup.json", "Pulp repository and distribution setup"),
         ("locust_stats.csv", "Locust summary CSV"),
         ("locust_stats_history.csv", "Locust history CSV"),
         ("requests.csv", "Individual requests CSV"),
@@ -248,10 +299,10 @@ def prepare_run(run_dir, results_dir):
 def completed_runs(results):
     if not results.is_dir():
         return
-    for scenario_dir in sorted(results.iterdir()):
-        if not scenario_dir.is_dir() or scenario_dir.name.startswith("_"):
+    for candidate_dir in sorted(results.iterdir()):
+        if not candidate_dir.is_dir() or candidate_dir.name.startswith("_"):
             continue
-        for run_dir in sorted(scenario_dir.iterdir()):
+        for run_dir in sorted(candidate_dir.iterdir()):
             if run_dir.is_dir() and (run_dir / "locust_stats.csv").is_file():
                 yield run_dir
 
@@ -281,7 +332,7 @@ def main():
         "",
         "# Overview",
         "",
-        "| Run | Scenario | Requests | Failures | Mean response (ms) | p95 (ms) |",
+        "| Run | Candidate | Requests | Failures | Mean response (ms) | p95 (ms) |",
         "|:--|:--|--:|--:|--:|--:|",
     ]
     sections = []

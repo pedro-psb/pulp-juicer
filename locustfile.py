@@ -18,18 +18,16 @@ from locust.stats import update_stats_history
 from db_cpu_monitor import DBCpuMonitor
 
 
-if "MODE" in os.environ:
-    raise ValueError("MODE was renamed to SCENARIO")
-scenario = os.environ.get("SCENARIO", "normal")
-if scenario not in {"staging", "normal"}:
-    raise ValueError("SCENARIO must be staging or normal")
+candidate = os.environ.get("CANDIDATE", "normal")
+if candidate not in {"staging", "normal"}:
+    raise ValueError("CANDIDATE must be staging or normal")
 
 run_dir = Path("_results") / "_run" / os.environ.get("RUN_ID", "local001")
 config = json.loads(Path(os.environ.get("SETUP_JSON", run_dir / "setup.json")).read_text())
 manifest = json.loads(Path(os.environ.get("MANIFEST_JSON", "fixture/manifest.json")).read_text())
-artifacts = manifest[scenario]
+artifacts = manifest[candidate]
 indices = itertools.count()
-distribution_url = config[scenario]["base_url"].rstrip("/")
+distribution_url = config[candidate]["base_url"].rstrip("/")
 if origin := os.environ.get("CONTENT_ORIGIN"):
     distribution_url = origin.rstrip("/") + urlsplit(distribution_url).path.rstrip("/")
 
@@ -58,7 +56,7 @@ def start_request_log(environment, **kwargs):
 
 @events.request.add_listener
 def record_request(request_type, name, response_time, response, exception, start_time, url, context, response_length, **kwargs):
-    if request_writer is None or request_type != "GET" or name != f"pull-through/{scenario}":
+    if request_writer is None or request_type != "GET" or name != f"pull-through/{candidate}":
         return
     request_writer.writerow((
         datetime.fromtimestamp(start_time, timezone.utc).isoformat(timespec="microseconds"),
@@ -128,7 +126,7 @@ def quit_when_complete(environment, **kwargs):
     @environment.events.request.add_listener
     def count_request(request_type, name, **kwargs):
         nonlocal completed
-        if request_type != "GET" or name != f"pull-through/{scenario}":
+        if request_type != "GET" or name != f"pull-through/{candidate}":
             return
         completed += 1
         if completed == len(artifacts):
@@ -148,7 +146,7 @@ class PullThroughUser(HttpUser):
         artifact = artifacts[index]
         with self.client.get(
             f"{distribution_url}/{artifact['path']}",
-            name=f"pull-through/{scenario}",
+            name=f"pull-through/{candidate}",
             context={"artifact_path": artifact["path"]},
             catch_response=True,
             timeout=60,

@@ -24,15 +24,15 @@ def main():
         parser.error("--count and --payload-bytes must be positive")
 
     entries = {"staging": [], "normal": []}
-    for scenario in entries:
+    for candidate in entries:
         for number in range(args.count):
             artifact = f"artifact-{number:06d}"
             relative_path = (
-                f"org/example/loadtest/{args.fixture_id}/{scenario}/{artifact}/1.0/"
+                f"org/example/loadtest/{args.fixture_id}/{candidate}/{artifact}/1.0/"
                 f"{artifact}-1.0.jar"
             )
             payload = hashlib.shake_256(
-                f"{args.fixture_id}:{scenario}:{number}".encode()
+                f"{args.fixture_id}:{candidate}:{number}".encode()
             ).digest(args.payload_bytes)
             jar = io.BytesIO()
             with ZipFile(jar, "w", compression=ZIP_STORED) as archive:
@@ -42,13 +42,13 @@ def main():
             destination = args.output / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
-            entries[scenario].append(
+            entries[candidate].append(
                 {"path": relative_path, "sha256": hashlib.sha256(data).hexdigest()}
             )
 
     manifest = args.output / "manifest.json"
     manifest.write_text(json.dumps(entries, indent=2) + "\n")
-    print(f"Created {args.count} artifacts per scenario in {args.output}")
+    print(f"Created {args.count} artifacts per candidate in {args.output}")
     print(f"Manifest: {manifest}")
 
 
