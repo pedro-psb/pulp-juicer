@@ -69,7 +69,7 @@ class RunResultMetadata:
 
 def _repository_root(compose_file: Path) -> Path:
     for parent in compose_file.parents:
-        if (parent / "pyproject.toml").is_file() and (parent / "locustfile.py").is_file():
+        if (parent / "pyproject.toml").is_file() and (parent / "src" / "pulp_juicer").is_dir():
             return parent
     raise ValueError(f"Cannot find repository root above {compose_file}")
 

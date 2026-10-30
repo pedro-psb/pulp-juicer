@@ -19,6 +19,7 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - Each fixture is an experiment-specific class derived from `ServiceFixture` or `VolumeFixture`.
 - `compose.yaml` defines Pulp; the runner adds fixture service fragments from required fixture metadata.
 - `Containerfile` builds Pulp with the selected pulpcore and plugin source contexts.
+- `settings/settings.py` configures Pulp for this experiment's Compose service.
 - `candidates.py` defines candidate classes that implement `setup` and configure the Maven resources using `pulp_juicer.PulpClient`.
 - `service_maven_fixture/compose.yaml` defines the upstream HTTP service.
 - `service_maven_fixture/fixture.py` implements `MavenServiceFixture.build` and `generate_metadata`.
@@ -50,6 +51,7 @@ uv run --locked pulp-juicer ls
 uv run --locked pulp-juicer show maven-pull-through
 uv run --locked pulp-juicer run maven-pull-through
 uv run --locked pulp-juicer run maven-pull-through --scenario burst --run-id run001
+uv run --locked --group report pulp-juicer report
 ```
 
 Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. The example staging candidate still has a placeholder Git URL; set its source in `experiment.py` before running with `--refresh-plan`.

@@ -1,5 +1,6 @@
 """Discover and execute Pulp load-test plans."""
 
+import json
 import os
 import re
 import shlex
@@ -12,6 +13,7 @@ from .catalog import experiments
 from .execution import execute_test_plan
 from .plan import build_test_plan, resolve_workdir
 from .plan_file import load_plan_file, write_plan_file
+from .report import render_report
 from .types import PulpConnection
 
 
@@ -68,6 +70,49 @@ def show_experiment(experiment_id):
         raise click.ClickException(str(exc)) from exc
     click.echo("Runs:")
     _list_run_columns(plan.runs)
+
+
+@cli.command("report")
+@click.option("--results", "results_dir", type=click.Path(path_type=Path),
+              default=Path("_juice/results"), show_default=True)
+@click.option("--quarto", "quarto_command", envvar="QUARTO", default="quarto", show_default=True)
+def report_results(results_dir, quarto_command):
+    """Render the completed runs as a Quarto HTML report."""
+    try:
+        report = render_report(results_dir, quarto_command)
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if report is None:
+        click.echo(f"No completed runs found under {results_dir}")
+    else:
+        click.echo(f"Report: {report}")
+
+
+@cli.command("results")
+@click.argument("experiment_id")
+@click.option("--workdir", type=click.Path(path_type=Path), default=Path("_juice"), show_default=True)
+def list_results(experiment_id, workdir):
+    """Print existing result directories for an experiment."""
+    registry = experiments()
+    if experiment_id not in registry:
+        raise click.ClickException(f"Unknown experiment: {experiment_id}")
+    _, compose_file = registry[experiment_id]
+    results_dir = resolve_workdir(compose_file, workdir) / "results"
+    found = False
+    for metadata_file in sorted(results_dir.glob("*/*/*/run_metadata.json")):
+        try:
+            metadata = json.loads(metadata_file.read_text())
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(f"Cannot read {metadata_file}: {exc}") from exc
+        if not isinstance(metadata, dict):
+            raise click.ClickException(f"Invalid run metadata: {metadata_file}")
+        recorded_experiment = metadata.get("experiment")
+        if (recorded_experiment == experiment_id or
+                (recorded_experiment is None and metadata.get("project") == f"pulp-juicer-{experiment_id}")):
+            click.echo(metadata_file.parent)
+            found = True
+    if not found:
+        click.echo(f"No results found for {experiment_id} under {results_dir}")
 
 
 def _docker_prefix(docker_command):

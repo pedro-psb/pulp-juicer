@@ -1,6 +1,5 @@
-"""Render one Quarto report containing all completed candidate runs."""
+"""Render a Quarto report from completed load-test runs."""
 
-import argparse
 import csv
 import html
 import json
@@ -303,8 +302,6 @@ def prepare_run(run_dir, results_dir):
     for name, label in (
         ("run_metadata.json", "Run configuration, setup, sources, and result"),
         ("data_load.csv", "Requests selected for this run"),
-        ("manifest.json", "Fixture manifest used for this run"),
-        ("setup.json", "Pulp repository and distribution setup"),
         ("locust_stats.csv", "Locust summary CSV"),
         ("locust_stats_history.csv", "Locust history CSV"),
         ("requests.csv", "Individual requests CSV"),
@@ -323,32 +320,36 @@ def prepare_run(run_dir, results_dir):
 def completed_runs(results):
     if not results.is_dir():
         return
-    stats_files = [*results.glob("*/*/locust_stats.csv"), *results.glob("*/*/*/locust_stats.csv")]
+    stats_files = results.glob("*/*/*/locust_stats.csv")
     for run_dir in sorted(stats_files):
         run_dir = run_dir.parent
         relative = run_dir.relative_to(results)
-        if len(relative.parts) not in (2, 3) or any(part.startswith("_") for part in relative.parts):
+        if any(part.startswith("_") for part in relative.parts):
             continue
         yield run_dir
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results", type=Path, default=Path("_juice/results"))
-    parser.add_argument("--quarto", default="quarto")
-    args = parser.parse_args()
-    runs = list(completed_runs(args.results))
+def render_report(
+    results_dir: Path = Path("_juice/results"),
+    quarto_command: str = "quarto",
+    title: str = "Pulp Juicer load test",
+) -> Path | None:
+    """Render completed runs and return the HTML path, or None when there are no runs."""
+    results_dir = Path(results_dir)
+    runs = list(completed_runs(results_dir))
     if not runs:
-        print(f"No completed runs found under {args.results}")
-        return
-    quarto = shutil.which(args.quarto)
+        return None
+    quarto = shutil.which(quarto_command)
     if quarto is None:
-        parser.error(f"Quarto executable not found: {args.quarto}. Install Quarto or set QUARTO=/path/to/quarto")
+        raise FileNotFoundError(
+            f"Quarto executable not found: {quarto_command}. "
+            "Install Quarto or run `make setup` to install the report dependencies."
+        )
     quarto = str(Path(quarto).resolve())
     runs.sort(key=lambda run_dir: (run_dir.name, run_dir.parent.name))
     lines = [
         "---",
-        f"title: {json.dumps('Maven pull-through load test')}",
+        f"title: {json.dumps(title)}",
         "format:",
         "  html:",
         "    toc: true",
@@ -362,8 +363,8 @@ def main():
     ]
     sections = []
     for run_dir in runs:
-        stats, body = prepare_run(run_dir, args.results)
-        scenario = run_dir.parent.parent.name if len(run_dir.relative_to(args.results).parts) == 3 else ""
+        stats, body = prepare_run(run_dir, results_dir)
+        scenario = run_dir.parent.parent.name if len(run_dir.relative_to(results_dir).parts) == 3 else ""
         lines.append(
             f"| {scenario} | {run_dir.name} | {run_dir.parent.name} | {stats['Request Count']} | "
             f"{stats['Failure Count']} | {number(stats, 'Average Response Time')} | "
@@ -372,14 +373,12 @@ def main():
         heading = f"{scenario} / " if scenario else ""
         sections.extend([f"## {heading}{run_dir.parent.name} / {run_dir.name}", "", *body])
     lines.extend(["", "# Runs", "", "::: {.panel-tabset}", "", *sections, ":::", ""])
-    source = args.results / "report.qmd"
+    source = results_dir / "report.qmd"
     source.write_text("\n".join(lines))
-    subprocess.run([quarto, "render", source.name, "--to", "html", "--output", "report.html", "--quiet"], cwd=args.results, check=True)
+    subprocess.run([quarto, "render", source.name, "--to", "html", "--output", "report.html", "--quiet"], cwd=results_dir, check=True)
     for run_dir in runs:
         for name in ("report.html", "report.qmd"):
             (run_dir / name).unlink(missing_ok=True)
-    print(f"Report: {(args.results / 'report.html').resolve()}")
+    return (results_dir / "report.html").resolve()
 
 
-if __name__ == "__main__":
-    main()

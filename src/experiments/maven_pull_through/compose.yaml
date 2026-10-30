@@ -22,7 +22,7 @@ services:
     ports:
       - "127.0.0.1:${PULP_PORT:-5001}:80"
     volumes:
-      - ../../../settings:/etc/pulp:Z
+      - ./settings:/etc/pulp:Z
       - pulp_storage:/var/lib/pulp
       - pgsql:/var/lib/pgsql
       - containers:/var/lib/containers

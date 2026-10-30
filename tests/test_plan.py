@@ -55,6 +55,32 @@ class TestPlan(unittest.TestCase):
 
 
 class TestCli(unittest.TestCase):
+    def test_results_lists_only_matching_experiment_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "_juice"
+            results = workdir / "results"
+            current = results / "burst" / "normal" / "run001"
+            earlier = results / "moderate" / "staging" / "run002"
+            other = results / "other" / "normal" / "run001"
+            incomplete = results / "tmp" / "normal" / "run001"
+            for directory in (current, earlier, other, incomplete):
+                directory.mkdir(parents=True)
+            (current / "run_metadata.json").write_text(json.dumps({"experiment": "maven-pull-through"}))
+            (earlier / "run_metadata.json").write_text(json.dumps({"project": "pulp-juicer-maven-pull-through"}))
+            (other / "run_metadata.json").write_text(json.dumps({
+                "experiment": "another-experiment", "project": "pulp-juicer-maven-pull-through",
+            }))
+
+            command = ["results", "maven-pull-through", "--workdir", str(workdir)]
+            response = CliRunner().invoke(cli, command)
+            self.assertEqual(response.exit_code, 0, response.output)
+            self.assertEqual(response.output.splitlines(), [str(current), str(earlier)])
+            self.assertFalse((workdir / "plan-maven-pull-through.json").exists())
+
+            unknown = CliRunner().invoke(cli, ["results", "unknown", "--workdir", str(workdir)])
+            self.assertNotEqual(unknown.exit_code, 0)
+            self.assertIn("Unknown experiment: unknown", unknown.output)
+
     def test_prepare_command_is_removed(self):
         result = CliRunner().invoke(cli, ["--help"])
         self.assertEqual(result.exit_code, 0, result.output)

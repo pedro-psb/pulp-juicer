@@ -25,4 +25,6 @@ The plan is the global run. Each ordered scenario contains its unit runs; each u
 
 `run` creates the plan on first use and loads it from `_juice/` afterward; `--refresh-plan` rebuilds it. `ls` lists experiments and scenarios with short descriptions; `show <experiment>` shows its full description, scenarios, candidates, and runs. `ps` lists pulp-juicer services, and `clean` removes their containers and networks. Existing unit results are skipped unless `run -f` is used; unsuccessful unit results are removed.
 
-Each successful run stores configuration, setup, source details, and result metrics in one `run_metadata.json`. Its selected requests are saved as `data_load.csv`; the full manifest stays in the shared fixture directory.
+Each successful run stores configuration, setup, source details, and result metrics in one `run_metadata.json`. Its selected requests are saved as `data_load.csv`; the full manifest stays under `_juice/fixture/`.
+`report` renders completed runs from `_juice/results` into a Quarto HTML report under the same directory.
+`results <experiment>` prints the existing result directories for that experiment.
