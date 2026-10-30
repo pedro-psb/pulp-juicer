@@ -3,10 +3,9 @@
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Mapping
 
 from .types import (
     CandidateConfig,
@@ -69,15 +68,23 @@ class RunResultMetadata:
 
 def _repository_root(compose_file: Path) -> Path:
     for parent in compose_file.parents:
-        if (parent / "pyproject.toml").is_file() and (parent / "src" / "pulp_juicer").is_dir():
+        if (parent / "pyproject.toml").is_file() and (
+            parent / "src" / "pulp_juicer"
+        ).is_dir():
             return parent
     raise ValueError(f"Cannot find repository root above {compose_file}")
 
 
-def resolve_workdir(compose_file: Path, workdir: Path, repository_root: Path | None = None) -> Path:
+def resolve_workdir(
+    compose_file: Path, workdir: Path, repository_root: Path | None = None
+) -> Path:
     """Resolve a plan workspace from the experiment's repository root."""
     workdir = Path(workdir)
-    root = Path(repository_root).resolve() if repository_root else _repository_root(Path(compose_file).resolve())
+    root = (
+        Path(repository_root).resolve()
+        if repository_root
+        else _repository_root(Path(compose_file).resolve())
+    )
     return workdir if workdir.is_absolute() else root / workdir
 
 
@@ -87,19 +94,29 @@ def _fixtures(scenario: ScenarioConfig, experiment: ExperimentConfig, workdir: P
     builds = []
     for requirement in scenario.requires:
         template = templates[requirement.name]
-        fingerprint = hashlib.sha256(json.dumps(requirement.args, sort_keys=True).encode()).hexdigest()[:12]
+        fingerprint = hashlib.sha256(
+            json.dumps(requirement.args, sort_keys=True).encode()
+        ).hexdigest()[:12]
         output_dir = template.output_dir
         if not output_dir.is_absolute():
             output_dir = workdir / output_dir
-        fixture = type(template)(name=template.name, output_dir=output_dir / fingerprint, **requirement.args)
+        fixture = type(template)(
+            name=template.name, output_dir=output_dir / fingerprint, **requirement.args
+        )
         details = fixture.generate_metadata()
         if details.name != requirement.name:
-            raise ValueError(f"Fixture metadata name {details.name!r} differs from {requirement.name!r}")
+            raise ValueError(
+                f"Fixture metadata name {details.name!r} differs from {requirement.name!r}"
+            )
         if isinstance(details, ServiceFixtureMetadata):
             environment = dict(details.environment)
             if "FIXTURE_DIR" in environment:
                 environment["FIXTURE_DIR"] = str(details.output_dir)
-            details = replace(details, compose_file=details.compose_file.resolve(), environment=environment)
+            details = replace(
+                details,
+                compose_file=details.compose_file.resolve(),
+                environment=environment,
+            )
         metadata[requirement.name] = details
         builds.append(fixture)
     return metadata, tuple(builds)
@@ -121,7 +138,11 @@ def build_test_plan(
     run_id: str | None = None,
 ) -> TestPlanMetadata:
     compose_file = Path(compose_file).resolve()
-    root = Path(repository_root).resolve() if repository_root else _repository_root(compose_file)
+    root = (
+        Path(repository_root).resolve()
+        if repository_root
+        else _repository_root(compose_file)
+    )
     workdir = resolve_workdir(compose_file, workdir, root)
     results_dir = Path(results_dir) if results_dir is not None else workdir / "results"
     if not results_dir.is_absolute():
@@ -130,7 +151,9 @@ def build_test_plan(
         if scenario_id is None or candidate_id is None:
             raise ValueError("An explicit run ID needs both a scenario and candidate")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
-            raise ValueError("Run ID must use letters, numbers, underscores, or hyphens")
+            raise ValueError(
+                "Run ID must use letters, numbers, underscores, or hyphens"
+            )
 
     candidates = {candidate.id: candidate for candidate in experiment.candidates}
     scenarios = {scenario.id: scenario for scenario in experiment.scenarios}
@@ -159,20 +182,24 @@ def build_test_plan(
             else:
                 selected_id = f"run{next_number:03d}"
                 next_number += 1
-            result_dir = results_dir / scenario.id / candidates[entry].name / selected_id
-            runs.append(RunMetadata(
-                experiment_id=experiment.id,
-                scenario_id=scenario.id,
-                candidate=candidates[entry],
-                run_id=selected_id,
-                fixtures=fixtures,
-                fixture_builds=builds,
-                load=scenario.load,
-                driver=scenario.driver,
-                input_builder=scenario.input,
-                restart_before=restart_before,
-                result_dir=result_dir,
-            ))
+            result_dir = (
+                results_dir / scenario.id / candidates[entry].name / selected_id
+            )
+            runs.append(
+                RunMetadata(
+                    experiment_id=experiment.id,
+                    scenario_id=scenario.id,
+                    candidate=candidates[entry],
+                    run_id=selected_id,
+                    fixtures=fixtures,
+                    fixture_builds=builds,
+                    load=scenario.load,
+                    driver=scenario.driver,
+                    input_builder=scenario.input,
+                    restart_before=restart_before,
+                    result_dir=result_dir,
+                )
+            )
             restart_before = False
             if run_id is not None:
                 break

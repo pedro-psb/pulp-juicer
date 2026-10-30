@@ -1,7 +1,7 @@
 """Build the Maven pull-through request list from its required fixture."""
 
 import json
-from typing import Mapping
+from collections.abc import Mapping
 
 from pulp_juicer import LoadConfig, ServiceFixtureMetadata
 
@@ -14,7 +14,9 @@ def build_pull_through(
     available = manifest["artifacts"]
     request_count = len(available) if load.request_count is None else load.request_count
     if request_count < 1 or request_count > len(available):
-        raise ValueError("request_count must be between 1 and the available fixture count")
+        raise ValueError(
+            "request_count must be between 1 and the available fixture count"
+        )
     artifacts = available[:request_count]
     if len({artifact["path"] for artifact in artifacts}) != request_count:
         raise ValueError("Selected fixture artifacts must have unique paths")

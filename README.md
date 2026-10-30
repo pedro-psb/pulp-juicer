@@ -19,9 +19,10 @@ uv run --locked pulp-juicer run maven-pull-through
 uv run --locked pulp-juicer run maven-pull-through --scenario burst --run-id run001
 uv run --locked pulp-juicer run maven-pull-through --all
 uv run --locked pulp-juicer report
+uv run --locked pulp-juicer results maven-pull-through
 ```
 
-`run` without a scenario lists the available runs and prepares a plan under `_juice/`. Select one unit with `--scenario` and `--run-id`, run a scenario by omitting `--run-id`, or run the entire plan with `--all`. Existing results are skipped; use `-f` to replace them. Results and generated fixtures are stored under `_juice/`.
+`run` without a scenario lists the available runs and prepares a plan under `_juice/`. Select one unit with `--scenario` and `--run-id`, run a scenario by omitting `--run-id`, or run the entire plan with `--all`. Existing results are skipped; use `-f` to replace them. Results and generated fixtures are stored under `_juice/`. `results` prints the experiment's run directories and generated report files.
 
 The Maven experiment and its source settings are documented in [its README](src/experiments/maven_pull_through/README.md). Set `PULPCORE_REPO` to use another pulpcore checkout. Set `COMPOSE` to override the default `docker compose` command. `uv run --locked pulp-juicer ps` lists active experiment services; `uv run --locked pulp-juicer clean` removes their containers and networks.
 

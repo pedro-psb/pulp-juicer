@@ -22,13 +22,17 @@ def source_details(source: str, path: Path) -> dict:
     revision = subprocess.check_output(
         ["git", "-C", str(path), "rev-parse", "HEAD"], text=True
     ).strip()
-    dirty = bool(subprocess.check_output(
-        ["git", "-C", str(path), "status", "--porcelain"], text=True
-    ).strip())
+    dirty = bool(
+        subprocess.check_output(
+            ["git", "-C", str(path), "status", "--porcelain"], text=True
+        ).strip()
+    )
     return {"source": source, "revision": revision, "dirty": dirty}
 
 
-def resolve_source(source: str, plugin: str, repository_root: Path, results_dir: Path) -> Path:
+def resolve_source(
+    source: str, plugin: str, repository_root: Path, results_dir: Path
+) -> Path:
     repository, separator, ref = source.partition("#")
     path = Path(repository).expanduser()
     if not repository.startswith(("https://", "http://", "ssh://", "git@", "file://")):
@@ -44,12 +48,19 @@ def resolve_source(source: str, plugin: str, repository_root: Path, results_dir:
     destination = results_dir / "_sources" / plugin / key
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not (destination / ".git").exists():
-        subprocess.run(["git", "clone", "--no-checkout", repository, str(destination)], check=True)
+        subprocess.run(
+            ["git", "clone", "--no-checkout", repository, str(destination)], check=True
+        )
     if separator:
-        subprocess.run(["git", "-C", str(destination), "fetch", "origin", ref], check=True)
+        subprocess.run(
+            ["git", "-C", str(destination), "fetch", "origin", ref], check=True
+        )
         checkout = "FETCH_HEAD"
     else:
         subprocess.run(["git", "-C", str(destination), "fetch", "origin"], check=True)
         checkout = "origin/HEAD"
-    subprocess.run(["git", "-C", str(destination), "checkout", "--force", "--detach", checkout], check=True)
+    subprocess.run(
+        ["git", "-C", str(destination), "checkout", "--force", "--detach", checkout],
+        check=True,
+    )
     return destination.resolve()

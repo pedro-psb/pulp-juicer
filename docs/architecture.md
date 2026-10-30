@@ -27,4 +27,4 @@ The plan is the global run. Each ordered scenario contains its unit runs; each u
 
 Each successful run stores configuration, setup, source details, and result metrics in one `run_metadata.json`. Its selected requests are saved as `data_load.csv`; the full manifest stays under `_juice/fixture/`.
 `report` renders completed runs from `_juice/results` into a Quarto HTML report under the same directory.
-`results <experiment>` prints the existing result directories for that experiment.
+`results <experiment>` prints its existing result directories and the shared report files when present.

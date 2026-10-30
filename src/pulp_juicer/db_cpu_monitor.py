@@ -22,7 +22,9 @@ class DBCpuMonitor:
             raise RuntimeError(f"Timed out waiting for DB CPU probe {message}")
         response = self.process.stderr.readline().strip()
         if response != message:
-            raise RuntimeError(f"DB CPU probe expected {message}, got {response or 'EOF'}")
+            raise RuntimeError(
+                f"DB CPU probe expected {message}, got {response or 'EOF'}"
+            )
 
     def start(self):
         self.output.parent.mkdir(parents=True, exist_ok=True)
@@ -30,10 +32,17 @@ class DBCpuMonitor:
         probe = Path(__file__).with_name("db_cpu_probe.py").read_text()
         command = [
             *self.compose,
-            "-p", self.project,
-            "-f", self.compose_file,
-            "exec", "-T", "pulp",
-            "python3", "-u", "-c", probe,
+            "-p",
+            self.project,
+            "-f",
+            self.compose_file,
+            "exec",
+            "-T",
+            "pulp",
+            "python3",
+            "-u",
+            "-c",
+            probe,
         ]
         try:
             self.process = subprocess.Popen(
@@ -60,7 +69,9 @@ class DBCpuMonitor:
             self.process.wait(timeout=10)
             error = self.process.stderr.read().strip()
             if self.process.returncode:
-                raise RuntimeError(f"DB CPU probe failed: {error or self.process.returncode}")
+                raise RuntimeError(
+                    f"DB CPU probe failed: {error or self.process.returncode}"
+                )
         finally:
             self.close()
         self.summarize()
@@ -94,7 +105,23 @@ class DBCpuMonitor:
         summary = self.output.with_name("db_cpu_summary.csv")
         with summary.open("w", newline="") as destination:
             writer = csv.writer(destination)
-            writer.writerow(("phase", "duration_s", "postgres_cpu_seconds", "postgres_cpu_mean_pct", "postgres_cpu_peak_pct", "samples"))
             writer.writerow(
-                ("run", f"{duration:.3f}", f"{cpu_seconds:.4f}", f"{cpu_seconds / duration * 100:.2f}" if duration else "0.00", f"{peak:.2f}", len(rows))
+                (
+                    "phase",
+                    "duration_s",
+                    "postgres_cpu_seconds",
+                    "postgres_cpu_mean_pct",
+                    "postgres_cpu_peak_pct",
+                    "samples",
+                )
+            )
+            writer.writerow(
+                (
+                    "run",
+                    f"{duration:.3f}",
+                    f"{cpu_seconds:.4f}",
+                    f"{cpu_seconds / duration * 100:.2f}" if duration else "0.00",
+                    f"{peak:.2f}",
+                    len(rows),
+                )
             )

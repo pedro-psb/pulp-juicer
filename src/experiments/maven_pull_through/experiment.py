@@ -13,7 +13,6 @@ from pulp_juicer import (
 from . import candidates, scenario_input
 from .service_maven_fixture.fixture import MavenServiceFixture
 
-
 EXPERIMENT = ExperimentConfig(
     id="maven-pull-through",
     short_description="Compare Maven pull-through candidates under two load patterns.",
@@ -53,7 +52,9 @@ EXPERIMENT = ExperimentConfig(
             id="burst",
             description="Thirty concurrent users request 650 unique Maven artifacts.",
             driver="http_get",
-            requires=(RequireFixture(name="maven", args={"count": 1000, "size": 65536}),),
+            requires=(
+                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
+            ),
             input=scenario_input.build_pull_through,
             runs=(1, 2, 3, "r", 3, 2, 1, "r", 2, 1, 3),
             load=LoadConfig(
@@ -71,7 +72,9 @@ EXPERIMENT = ExperimentConfig(
             id="moderate",
             description="Ten concurrent users request 200 unique Maven artifacts.",
             driver="http_get",
-            requires=(RequireFixture(name="maven", args={"count": 1000, "size": 65536}),),
+            requires=(
+                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
+            ),
             input=scenario_input.build_pull_through,
             runs=(1, 2, 3, "r", 3, 2, 1),
             load=LoadConfig(
@@ -89,7 +92,9 @@ EXPERIMENT = ExperimentConfig(
             id="tmp",
             description="Temporary experiments.",
             driver="http_get",
-            requires=(RequireFixture(name="maven", args={"count": 1000, "size": 65536}),),
+            requires=(
+                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
+            ),
             input=scenario_input.build_pull_through,
             runs=(1,),
             load=LoadConfig(

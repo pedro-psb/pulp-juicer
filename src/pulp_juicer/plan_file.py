@@ -8,7 +8,13 @@ from pathlib import Path
 
 from .catalog import experiments
 from .plan import RunMetadata, TestPlanMetadata
-from .types import LoadConfig, PluginSource, PulpConnection, ServiceFixtureMetadata, VolumeFixtureMetadata
+from .types import (
+    LoadConfig,
+    PluginSource,
+    PulpConnection,
+    ServiceFixtureMetadata,
+    VolumeFixtureMetadata,
+)
 
 VERSION = 2
 
@@ -22,7 +28,9 @@ def _unit(run: RunMetadata) -> dict:
         "run_id": run.run_id,
         "candidate": asdict(run.candidate),
         "fixtures": fixtures,
-        "fixture_builds": [{"class": type(item).__name__, **vars(item)} for item in run.fixture_builds],
+        "fixture_builds": [
+            {"class": type(item).__name__, **vars(item)} for item in run.fixture_builds
+        ],
         "load": asdict(run.load),
         "driver": run.driver,
         "restart_before": run.restart_before,
@@ -34,7 +42,10 @@ def write_plan_file(plan: TestPlanMetadata) -> Path:
     """Write a single plan at <workdir>/plan-<experiment>.json."""
     path = plan.workdir / f"plan-{plan.experiment.id}.json"
     scenarios = [
-        {"scenario": scenario.id, "runs": [_unit(run) for run in plan.runs if run.scenario_id == scenario.id]}
+        {
+            "scenario": scenario.id,
+            "runs": [_unit(run) for run in plan.runs if run.scenario_id == scenario.id],
+        }
         for scenario in plan.experiment.scenarios
     ]
     data = {
@@ -56,7 +67,9 @@ def write_plan_file(plan: TestPlanMetadata) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".plan-", delete=False) as stream:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=path.parent, prefix=".plan-", delete=False
+        ) as stream:
             temporary = Path(stream.name)
             json.dump(data, stream, indent=2, default=str)
             stream.write("\n")
@@ -67,7 +80,9 @@ def write_plan_file(plan: TestPlanMetadata) -> Path:
     return path
 
 
-def _hydrate_run(unit: dict, scenario_id: str, experiment, templates, candidates, input_builder) -> RunMetadata:
+def _hydrate_run(
+    unit: dict, scenario_id: str, experiment, templates, candidates, input_builder
+) -> RunMetadata:
     candidate_data = unit["candidate"]
     candidate_id = candidate_data["id"]
     if candidate_id not in candidates:
@@ -97,14 +112,23 @@ def _hydrate_run(unit: dict, scenario_id: str, experiment, templates, candidates
             raise ValueError(f"Fixture class changed for {name}")
         builds.append(type(template)(name=name, **values))
     return RunMetadata(
-        experiment_id=experiment.id, scenario_id=scenario_id, candidate=candidate,
-        run_id=unit["run_id"], fixtures=fixtures, fixture_builds=tuple(builds),
-        load=LoadConfig(**unit["load"]), driver=unit["driver"], input_builder=input_builder,
-        restart_before=unit["restart_before"], result_dir=Path(unit["result_dir"]),
+        experiment_id=experiment.id,
+        scenario_id=scenario_id,
+        candidate=candidate,
+        run_id=unit["run_id"],
+        fixtures=fixtures,
+        fixture_builds=tuple(builds),
+        load=LoadConfig(**unit["load"]),
+        driver=unit["driver"],
+        input_builder=input_builder,
+        restart_before=unit["restart_before"],
+        result_dir=Path(unit["result_dir"]),
     )
 
 
-def load_plan_file(path: Path, *, scenario_id: str | None = None, run_id: str | None = None) -> TestPlanMetadata:
+def load_plan_file(
+    path: Path, *, scenario_id: str | None = None, run_id: str | None = None
+) -> TestPlanMetadata:
     """Load the global, scenario, or unit scope from one JSON plan."""
     if run_id is not None and scenario_id is None:
         raise ValueError("A run ID requires a scenario")
@@ -132,22 +156,33 @@ def load_plan_file(path: Path, *, scenario_id: str | None = None, run_id: str | 
             if current_run_id in seen_runs:
                 raise ValueError(f"Duplicate run ID in {current_id}: {current_run_id}")
             seen_runs.add(current_run_id)
-            if scenario_id is None or scenario_id == current_id:
-                if run_id is None or run_id == current_run_id:
-                    selected.append(_hydrate_run(
-                        unit, current_id, experiment, templates, candidates, scenarios[current_id].input,
-                    ))
+            if (scenario_id is None or scenario_id == current_id) and (
+                run_id is None or run_id == current_run_id
+            ):
+                selected.append(
+                    _hydrate_run(
+                        unit,
+                        current_id,
+                        experiment,
+                        templates,
+                        candidates,
+                        scenarios[current_id].input,
+                    )
+                )
     if scenario_id is not None and scenario_id not in seen_scenarios:
         raise ValueError(f"Unknown scenario: {scenario_id}")
     if not selected:
         raise ValueError(f"No runs selected from {path}")
     runtime = data["runtime"]
     return TestPlanMetadata(
-        experiment=experiment, repository_root=Path(runtime["repository_root"]),
-        workdir=Path(runtime["workdir"]), compose_file=Path(runtime["compose_file"]),
+        experiment=experiment,
+        repository_root=Path(runtime["repository_root"]),
+        workdir=Path(runtime["workdir"]),
+        compose_file=Path(runtime["compose_file"]),
         results_dir=Path(runtime["results_dir"]),
         pulp_connection=PulpConnection(**runtime["pulp_connection"]),
         pulpcore_source=runtime["pulpcore_source"],
         compose_command=tuple(runtime["compose_command"]),
-        ready_timeout_seconds=runtime["ready_timeout_seconds"], runs=tuple(selected),
+        ready_timeout_seconds=runtime["ready_timeout_seconds"],
+        runs=tuple(selected),
     )

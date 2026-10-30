@@ -5,7 +5,7 @@ import os
 import select
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def postgres_ticks():
@@ -40,7 +40,14 @@ def main():
     pending_cpu_seconds = 0.0
     writer = csv.writer(sys.stdout)
     writer.writerow(
-        ("timestamp_utc", "elapsed_s", "interval_s", "postgres_cpu_pct", "postgres_cpu_seconds", "postgres_processes")
+        (
+            "timestamp_utc",
+            "elapsed_s",
+            "interval_s",
+            "postgres_cpu_pct",
+            "postgres_cpu_seconds",
+            "postgres_processes",
+        )
     )
     sys.stdout.flush()
     print("STARTED", file=sys.stderr, flush=True)
@@ -49,16 +56,17 @@ def main():
         ready, _, _ = select.select([sys.stdin], [], [], 0.1)
         now = time.monotonic()
         current = postgres_ticks()
-        pending_cpu_seconds += sum(
-            max(0, ticks - previous.get(pid, 0)) for pid, ticks in current.items()
-        ) / clock_ticks
+        pending_cpu_seconds += (
+            sum(max(0, ticks - previous.get(pid, 0)) for pid, ticks in current.items())
+            / clock_ticks
+        )
         previous = current
 
         elapsed = now - last_emit
         if elapsed >= 1 or ready:
             writer.writerow(
                 (
-                    datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                    datetime.now(UTC).isoformat(timespec="milliseconds"),
                     f"{now - start:.3f}",
                     f"{elapsed:.3f}",
                     f"{pending_cpu_seconds / elapsed * 100:.2f}" if elapsed else "0.00",

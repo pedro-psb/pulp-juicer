@@ -43,9 +43,15 @@ class TestReportDiscovery(unittest.TestCase):
                 self.assertEqual(kwargs["cwd"], results)
                 (results / "report.html").write_text("<html>report</html>")
 
-            with patch("pulp_juicer.report.shutil.which", return_value="/bin/true"), \
-                 patch("pulp_juicer.report.subprocess.run", side_effect=fake_quarto) as render:
-                response = CliRunner().invoke(cli, ["report", "--results", str(results)])
+            with (
+                patch("pulp_juicer.report.shutil.which", return_value="/bin/true"),
+                patch(
+                    "pulp_juicer.report.subprocess.run", side_effect=fake_quarto
+                ) as render,
+            ):
+                response = CliRunner().invoke(
+                    cli, ["report", "--results", str(results)]
+                )
 
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertIn(f"Report: {results / 'report.html'}", response.output)

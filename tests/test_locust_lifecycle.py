@@ -34,15 +34,30 @@ class TestLocustLifecycle(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 metadata = RunMetadata(
-                    "smoke", "small", SimpleNamespace(id=1, name="normal"), "run001", {}, (),
-                    LoadConfig(users=1, spawn_rate_per_second=1, max_duration="5s",
-                               idle_before_seconds=0, tail_after_seconds=0),
-                    "http_get", lambda *args: {}, True, Path(tmp) / "result",
+                    "smoke",
+                    "small",
+                    SimpleNamespace(id=1, name="normal"),
+                    "run001",
+                    {},
+                    (),
+                    LoadConfig(
+                        users=1,
+                        spawn_rate_per_second=1,
+                        max_duration="5s",
+                        idle_before_seconds=0,
+                        tail_after_seconds=0,
+                    ),
+                    "http_get",
+                    lambda *args: {},
+                    True,
+                    Path(tmp) / "result",
                 )
                 result = run(
                     metadata,
-                    lambda: {"base_url": f"http://127.0.0.1:{server.server_port}",
-                             "requests": [{"path": "broken", "expected_status": 200}]},
+                    lambda: {
+                        "base_url": f"http://127.0.0.1:{server.server_port}",
+                        "requests": [{"path": "broken", "expected_status": 200}],
+                    },
                     lambda: None,
                     monitor_cpu=False,
                 )
@@ -75,10 +90,23 @@ class TestLocustLifecycle(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 metadata = RunMetadata(
-                    "smoke", "small", SimpleNamespace(id=1, name="normal"), "run001", {}, (),
-                    LoadConfig(users=2, spawn_rate_per_second=2, max_duration="10s",
-                               idle_before_seconds=0, tail_after_seconds=0),
-                    "http_get", lambda *args: {}, True, Path(tmp) / "result",
+                    "smoke",
+                    "small",
+                    SimpleNamespace(id=1, name="normal"),
+                    "run001",
+                    {},
+                    (),
+                    LoadConfig(
+                        users=2,
+                        spawn_rate_per_second=2,
+                        max_duration="10s",
+                        idle_before_seconds=0,
+                        tail_after_seconds=0,
+                    ),
+                    "http_get",
+                    lambda *args: {},
+                    True,
+                    Path(tmp) / "result",
                 )
 
                 def start():
@@ -86,30 +114,49 @@ class TestLocustLifecycle(unittest.TestCase):
                     return {
                         "base_url": f"http://127.0.0.1:{server.server_port}",
                         "requests": [
-                            {"path": str(index), "sha256": hashlib.sha256(b"fixture").hexdigest()}
+                            {
+                                "path": str(index),
+                                "sha256": hashlib.sha256(b"fixture").hexdigest(),
+                            }
                             for index in range(2)
                         ],
                     }
 
                 progress = []
                 result = run(
-                    metadata, start, lambda: events.append("stop"), monitor_cpu=False,
-                    on_progress=progress.append, progress_interval_seconds=0.05,
+                    metadata,
+                    start,
+                    lambda: events.append("stop"),
+                    monitor_cpu=False,
+                    on_progress=progress.append,
+                    progress_interval_seconds=0.05,
                 )
                 self.assertEqual(result.completed_requests, 2)
                 self.assertEqual(result.failures, 0)
                 self.assertEqual(events, ["start", "request", "request", "stop"])
                 self.assertIn("Locust: preparing service and requests...", progress)
-                self.assertTrue(any("Locust: 2/2 requests" in line for line in progress))
-                self.assertGreaterEqual(sum(" requests," in line for line in progress), 3)
+                self.assertTrue(
+                    any("Locust: 2/2 requests" in line for line in progress)
+                )
+                self.assertGreaterEqual(
+                    sum(" requests," in line for line in progress), 3
+                )
                 with (metadata.result_dir / "data_load.csv").open(newline="") as stream:
                     data_load = list(csv.DictReader(stream))
                 self.assertEqual([row["path"] for row in data_load], ["0", "1"])
                 self.assertEqual(
                     [row["url"] for row in data_load],
-                    [f"http://127.0.0.1:{server.server_port}/{index}" for index in range(2)],
+                    [
+                        f"http://127.0.0.1:{server.server_port}/{index}"
+                        for index in range(2)
+                    ],
                 )
-                self.assertTrue(all(row["sha256"] == hashlib.sha256(b"fixture").hexdigest() for row in data_load))
+                self.assertTrue(
+                    all(
+                        row["sha256"] == hashlib.sha256(b"fixture").hexdigest()
+                        for row in data_load
+                    )
+                )
                 self.assertFalse((metadata.result_dir / "scenario_input.json").exists())
                 self.assertFalse((metadata.result_dir / "run.json").exists())
                 self.assertFalse((metadata.result_dir / "run_result.json").exists())
@@ -121,10 +168,23 @@ class TestLocustLifecycle(unittest.TestCase):
         events = []
         with tempfile.TemporaryDirectory() as tmp:
             metadata = RunMetadata(
-                "smoke", "small", SimpleNamespace(id=1, name="normal"), "run001", {}, (),
-                LoadConfig(users=1, spawn_rate_per_second=1, max_duration="2s",
-                           idle_before_seconds=0, tail_after_seconds=0),
-                "http_get", lambda *args: {}, True, Path(tmp) / "result",
+                "smoke",
+                "small",
+                SimpleNamespace(id=1, name="normal"),
+                "run001",
+                {},
+                (),
+                LoadConfig(
+                    users=1,
+                    spawn_rate_per_second=1,
+                    max_duration="2s",
+                    idle_before_seconds=0,
+                    tail_after_seconds=0,
+                ),
+                "http_get",
+                lambda *args: {},
+                True,
+                Path(tmp) / "result",
             )
 
             def start():

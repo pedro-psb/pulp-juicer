@@ -1,7 +1,7 @@
 """Execute a declarative test plan using small fixture, Compose, and Locust steps."""
 
-import json
 import hashlib
+import json
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -21,21 +21,33 @@ def _compose_inputs(plan: TestPlanMetadata, run: RunMetadata):
     for fixture in run.fixtures.values():
         if isinstance(fixture, ServiceFixtureMetadata):
             files.append(fixture.compose_file)
-            environment.update({key: str(value) for key, value in fixture.environment.items()})
+            environment.update(
+                {key: str(value) for key, value in fixture.environment.items()}
+            )
         elif isinstance(fixture, VolumeFixtureMetadata):
-            mounts.append({
-                "type": "bind", "source": str(fixture.output_dir),
-                "target": fixture.mount_path, "read_only": fixture.read_only,
-            })
+            mounts.append(
+                {
+                    "type": "bind",
+                    "source": str(fixture.output_dir),
+                    "target": fixture.mount_path,
+                    "read_only": fixture.read_only,
+                }
+            )
     if mounts:
-        override = plan.results_dir / "_compose" / f"{run.scenario_id}-volume-fixtures.yaml"
+        override = (
+            plan.results_dir / "_compose" / f"{run.scenario_id}-volume-fixtures.yaml"
+        )
         override.parent.mkdir(parents=True, exist_ok=True)
-        override.write_text(json.dumps({"services": {"pulp": {"volumes": mounts}}}, indent=2) + "\n")
+        override.write_text(
+            json.dumps({"services": {"pulp": {"volumes": mounts}}}, indent=2) + "\n"
+        )
         files.append(override)
     return tuple(dict.fromkeys(files)), environment
 
 
-def _write_run_context(plan, run, result, candidate_data, pulpcore, plugin_path, project):
+def _write_run_context(
+    plan, run, result, candidate_data, pulpcore, plugin_path, project
+):
     """Keep the run configuration, setup, sources, and result in one metadata file."""
     output = result.result_dir
     fixture_build = run.fixture_builds[0] if run.fixture_builds else None
@@ -50,7 +62,9 @@ def _write_run_context(plan, run, result, candidate_data, pulpcore, plugin_path,
         "requested_count": getattr(fixture_build, "count", count),
         "requested_fixture_id": fixture.name if fixture else "",
         "requested_payload_bytes": getattr(fixture_build, "size", 0),
-        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest() if manifest else "",
+        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        if manifest
+        else "",
     }
     metadata = {
         "experiment": run.experiment_id,
@@ -71,10 +85,14 @@ def _write_run_context(plan, run, result, candidate_data, pulpcore, plugin_path,
         },
         "sources": {
             "pulpcore": source_details(plan.pulpcore_source, pulpcore),
-            run.candidate.source.plugin: source_details(run.candidate.source.git, plugin_path),
+            run.candidate.source.plugin: source_details(
+                run.candidate.source.git, plugin_path
+            ),
         },
         "project": project,
-        "upstream_url": fixture.url if isinstance(fixture, ServiceFixtureMetadata) else "",
+        "upstream_url": fixture.url
+        if isinstance(fixture, ServiceFixtureMetadata)
+        else "",
         "setup": candidate_data,
         "result": {
             "expected_requests": result.expected_requests,
@@ -89,7 +107,9 @@ def _write_run_context(plan, run, result, candidate_data, pulpcore, plugin_path,
 
 
 def execute_test_plan(
-    plan: TestPlanMetadata, *, monitor_cpu: bool = True,
+    plan: TestPlanMetadata,
+    *,
+    monitor_cpu: bool = True,
     force: bool = False,
     on_skip: Callable[[RunMetadata], None] | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -103,7 +123,9 @@ def execute_test_plan(
     def source_path(source: str, plugin: str) -> Path:
         key = (source, plugin)
         if key not in sources:
-            sources[key] = resolve_source(source, plugin, plan.repository_root, plan.results_dir)
+            sources[key] = resolve_source(
+                source, plugin, plan.repository_root, plan.results_dir
+            )
         return sources[key]
 
     try:
@@ -115,14 +137,16 @@ def execute_test_plan(
                 continue
             context = {}
             if on_progress:
-                on_progress(f"Starting {run.scenario_id}/{run.run_id} {run.candidate.name}")
+                on_progress(
+                    f"Starting {run.scenario_id}/{run.run_id} {run.candidate.name}"
+                )
             runtime.destroy_before_start(reset=run.restart_before)
             if existing_results:
                 if on_progress:
                     on_progress(f"Replacing existing results at {run.result_dir}")
                 shutil.rmtree(run.result_dir)
 
-            def start_run():
+            def start_run(run=run, context=context):
                 for fixture in run.fixture_builds:
                     if fixture.output_dir not in built:
                         fixture.build()
@@ -131,28 +155,54 @@ def execute_test_plan(
                 pulpcore = source_path(plan.pulpcore_source, "pulpcore")
                 plugin = run.candidate.source.plugin
                 plugin_path = source_path(run.candidate.source.git, plugin)
-                environment.update({
-                    "PULPCORE_REPO": str(pulpcore),
-                    plugin_environment_name(plugin): str(plugin_path),
-                    "PULP_PORT": str(urlsplit(plan.pulp_connection.base_url).port or 5001),
-                    "PULP_PASSWORD": plan.pulp_connection.password,
-                })
+                environment.update(
+                    {
+                        "PULPCORE_REPO": str(pulpcore),
+                        plugin_environment_name(plugin): str(plugin_path),
+                        "PULP_PORT": str(
+                            urlsplit(plan.pulp_connection.base_url).port or 5001
+                        ),
+                        "PULP_PASSWORD": plan.pulp_connection.password,
+                    }
+                )
                 runtime.ensure(files, environment, (plugin, plugin_path))
-                candidate_run_id = f"{run.scenario_id}-{run.run_id}-{run.candidate.name}"
-                candidate_data = run.candidate.setup(plan.pulp_connection, run.fixtures, candidate_run_id)
-                context.update(candidate_data=candidate_data, pulpcore=pulpcore, plugin_path=plugin_path)
+                candidate_run_id = (
+                    f"{run.scenario_id}-{run.run_id}-{run.candidate.name}"
+                )
+                candidate_data = run.candidate.setup(
+                    plan.pulp_connection, run.fixtures, candidate_run_id
+                )
+                context.update(
+                    candidate_data=candidate_data,
+                    pulpcore=pulpcore,
+                    plugin_path=plugin_path,
+                )
                 return run.input_builder(run.fixtures, candidate_data, run.load)
 
             result = run_locust(
-                run, start_run, runtime.close, compose_command=plan.compose_command,
-                project=runtime.project, compose_file=plan.compose_file,
-                monitor_cpu=monitor_cpu, on_progress=on_progress,
+                run,
+                start_run,
+                runtime.close,
+                compose_command=plan.compose_command,
+                project=runtime.project,
+                compose_file=plan.compose_file,
+                monitor_cpu=monitor_cpu,
+                on_progress=on_progress,
             )
-            if not result.timed_out and result.failures == 0 and result.completed_requests >= result.expected_requests:
+            if (
+                not result.timed_out
+                and result.failures == 0
+                and result.completed_requests >= result.expected_requests
+            ):
                 try:
                     _write_run_context(
-                        plan, run, result, context["candidate_data"], context["pulpcore"],
-                        context["plugin_path"], runtime.project,
+                        plan,
+                        run,
+                        result,
+                        context["candidate_data"],
+                        context["pulpcore"],
+                        context["plugin_path"],
+                        runtime.project,
                     )
                 except BaseException:
                     shutil.rmtree(run.result_dir)

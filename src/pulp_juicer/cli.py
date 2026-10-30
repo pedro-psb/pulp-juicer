@@ -36,7 +36,9 @@ def _list_run_columns(runs):
     run_width = max(len("RUN_ID"), *(len(run.run_id) for run in runs))
     click.echo(f"  {'SCENARIO':<{scenario_width}}  {'RUN_ID':<{run_width}}  CANDIDATE")
     for run in runs:
-        click.echo(f"  {run.scenario_id:<{scenario_width}}  {run.run_id:<{run_width}}  {run.candidate.name}")
+        click.echo(
+            f"  {run.scenario_id:<{scenario_width}}  {run.run_id:<{run_width}}  {run.candidate.name}"
+        )
 
 
 @cli.command("ls")
@@ -60,7 +62,9 @@ def show_experiment(experiment_id):
     click.echo("Scenarios:")
     for scenario in experiment.scenarios:
         count = sum(isinstance(value, int) for value in scenario.runs)
-        click.echo(f"  {scenario.id}: {scenario.description} ({count} runs, {scenario.load.users} users)")
+        click.echo(
+            f"  {scenario.id}: {scenario.description} ({count} runs, {scenario.load.users} users)"
+        )
     click.echo("Candidates:")
     for candidate in experiment.candidates:
         click.echo(f"  {candidate.id}: {candidate.name}")
@@ -73,9 +77,16 @@ def show_experiment(experiment_id):
 
 
 @cli.command("report")
-@click.option("--results", "results_dir", type=click.Path(path_type=Path),
-              default=Path("_juice/results"), show_default=True)
-@click.option("--quarto", "quarto_command", envvar="QUARTO", default="quarto", show_default=True)
+@click.option(
+    "--results",
+    "results_dir",
+    type=click.Path(path_type=Path),
+    default=Path("_juice/results"),
+    show_default=True,
+)
+@click.option(
+    "--quarto", "quarto_command", envvar="QUARTO", default="quarto", show_default=True
+)
 def report_results(results_dir, quarto_command):
     """Render the completed runs as a Quarto HTML report."""
     try:
@@ -90,9 +101,14 @@ def report_results(results_dir, quarto_command):
 
 @cli.command("results")
 @click.argument("experiment_id")
-@click.option("--workdir", type=click.Path(path_type=Path), default=Path("_juice"), show_default=True)
+@click.option(
+    "--workdir",
+    type=click.Path(path_type=Path),
+    default=Path("_juice"),
+    show_default=True,
+)
 def list_results(experiment_id, workdir):
-    """Print existing result directories for an experiment."""
+    """Print an experiment's result directories and generated report files."""
     registry = experiments()
     if experiment_id not in registry:
         raise click.ClickException(f"Unknown experiment: {experiment_id}")
@@ -107,11 +123,18 @@ def list_results(experiment_id, workdir):
         if not isinstance(metadata, dict):
             raise click.ClickException(f"Invalid run metadata: {metadata_file}")
         recorded_experiment = metadata.get("experiment")
-        if (recorded_experiment == experiment_id or
-                (recorded_experiment is None and metadata.get("project") == f"pulp-juicer-{experiment_id}")):
+        if recorded_experiment == experiment_id or (
+            recorded_experiment is None
+            and metadata.get("project") == f"pulp-juicer-{experiment_id}"
+        ):
             click.echo(metadata_file.parent)
             found = True
-    if not found:
+    if found:
+        for name in ("report.html", "report.qmd"):
+            report_file = results_dir / name
+            if report_file.is_file():
+                click.echo(report_file)
+    else:
         click.echo(f"No results found for {experiment_id} under {results_dir}")
 
 
@@ -127,7 +150,9 @@ def _docker_prefix(docker_command):
 
 def _docker_output(executable, *args):
     try:
-        return subprocess.run([*executable, *args], check=True, capture_output=True, text=True).stdout
+        return subprocess.run(
+            [*executable, *args], check=True, capture_output=True, text=True
+        ).stdout
     except OSError as exc:
         raise click.ClickException(f"Cannot run Docker: {exc}") from exc
     except subprocess.CalledProcessError as exc:
@@ -138,11 +163,17 @@ def _compose_containers(executable):
     row_format = (
         '{{.ID}}\t{{.Label "com.docker.compose.project"}}\t'
         '{{.Label "com.docker.compose.service"}}\t'
-        '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+        "{{.Names}}\t{{.Status}}\t{{.Ports}}"
     )
     output = _docker_output(
-        executable, "container", "ls", "--all",
-        "--filter", "label=com.docker.compose.project", "--format", row_format,
+        executable,
+        "container",
+        "ls",
+        "--all",
+        "--filter",
+        "label=com.docker.compose.project",
+        "--format",
+        row_format,
     )
     services = []
     for line in output.splitlines():
@@ -157,8 +188,13 @@ def _compose_containers(executable):
 def _compose_networks(executable):
     row_format = '{{.ID}}\t{{.Label "com.docker.compose.project"}}\t{{.Name}}'
     output = _docker_output(
-        executable, "network", "ls", "--filter", "label=com.docker.compose.project",
-        "--format", row_format,
+        executable,
+        "network",
+        "ls",
+        "--filter",
+        "label=com.docker.compose.project",
+        "--format",
+        row_format,
     )
     networks = []
     for line in output.splitlines():
@@ -178,11 +214,18 @@ def list_services(docker_command):
     if not services:
         click.echo("No pulp-juicer services found.")
         return
-    rows = [("PROJECT", "SERVICE", "CONTAINER", "STATUS", "PORTS"),
-            *(service[1:] for service in sorted(services, key=lambda item: item[1:4]))]
+    rows = [
+        ("PROJECT", "SERVICE", "CONTAINER", "STATUS", "PORTS"),
+        *(service[1:] for service in sorted(services, key=lambda item: item[1:4])),
+    ]
     widths = [max(len(row[index]) for row in rows) for index in range(4)]
     for row in rows:
-        click.echo("  ".join(f"{value:<{widths[index]}}" for index, value in enumerate(row[:4])) + f"  {row[4]}")
+        click.echo(
+            "  ".join(
+                f"{value:<{widths[index]}}" for index, value in enumerate(row[:4])
+            )
+            + f"  {row[4]}"
+        )
 
 
 @cli.command("clean")
@@ -193,42 +236,77 @@ def clean_services(docker_command):
     containers = _compose_containers(executable)
     networks = _compose_networks(executable)
     if containers:
-        _docker_output(executable, "container", "rm", "--force", *(item[0] for item in containers))
+        _docker_output(
+            executable, "container", "rm", "--force", *(item[0] for item in containers)
+        )
     if networks:
         _docker_output(executable, "network", "rm", *(item[0] for item in networks))
-    click.echo(f"Removed {len(containers)} container(s) and {len(networks)} network(s).")
+    click.echo(
+        f"Removed {len(containers)} container(s) and {len(networks)} network(s)."
+    )
 
 
 @cli.command("run")
 @click.argument("experiment_id")
-@click.option("--workdir", type=click.Path(path_type=Path), default=Path("_juice"), show_default=True)
-@click.option("--all", "run_all", is_flag=True, help="Run every scenario and unit in the plan.")
+@click.option(
+    "--workdir",
+    type=click.Path(path_type=Path),
+    default=Path("_juice"),
+    show_default=True,
+)
+@click.option(
+    "--all", "run_all", is_flag=True, help="Run every scenario and unit in the plan."
+)
 @click.option("--scenario", "scenario_id", help="Run one scenario from the plan.")
 @click.option("--run-id", help="Run one unit within the selected scenario.")
-@click.option("-f", "--force", is_flag=True, help="Rerun selected units even if results already exist.")
-@click.option("--refresh-plan", is_flag=True, help="Rebuild the stored plan from the experiment.")
+@click.option(
+    "-f",
+    "--force",
+    is_flag=True,
+    help="Rerun selected units even if results already exist.",
+)
+@click.option(
+    "--refresh-plan", is_flag=True, help="Rebuild the stored plan from the experiment."
+)
 def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refresh_plan):
     """List available runs, or execute a selected experiment scope."""
     registry = experiments()
     if experiment_id not in registry:
         raise click.ClickException(f"Unknown experiment: {experiment_id}")
     if run_all and (scenario_id is not None or run_id is not None):
-        raise click.ClickException("--all cannot be combined with --scenario or --run-id")
+        raise click.ClickException(
+            "--all cannot be combined with --scenario or --run-id"
+        )
     experiment, compose_file = registry[experiment_id]
     plan_file = resolve_workdir(compose_file, workdir) / f"plan-{experiment_id}.json"
     try:
         if refresh_plan or not plan_file.is_file():
             previous = load_plan_file(plan_file) if plan_file.is_file() else None
-            command = previous.compose_command if previous else tuple(shlex.split(os.environ.get("COMPOSE", "docker compose")))
+            command = (
+                previous.compose_command
+                if previous
+                else tuple(shlex.split(os.environ.get("COMPOSE", "docker compose")))
+            )
             if not command:
                 raise ValueError("Compose command must not be empty")
             prepared = build_test_plan(
-                experiment, compose_file, workdir=workdir,
-                pulp_connection=(previous.pulp_connection if previous else
-                                 PulpConnection(password=os.environ.get("PULP_PASSWORD", "password"))),
-                pulpcore_source=previous.pulpcore_source if previous else os.environ.get("PULPCORE_REPO", "../pulpcore"),
+                experiment,
+                compose_file,
+                workdir=workdir,
+                pulp_connection=(
+                    previous.pulp_connection
+                    if previous
+                    else PulpConnection(
+                        password=os.environ.get("PULP_PASSWORD", "password")
+                    )
+                ),
+                pulpcore_source=previous.pulpcore_source
+                if previous
+                else os.environ.get("PULPCORE_REPO", "../pulpcore"),
                 compose_command=command,
-                ready_timeout_seconds=previous.ready_timeout_seconds if previous else 300,
+                ready_timeout_seconds=previous.ready_timeout_seconds
+                if previous
+                else 300,
             )
             write_plan_file(prepared)
             click.echo(f"Prepared {len(prepared.runs)} runs: {plan_file}")
@@ -236,7 +314,9 @@ def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refres
         if not run_all and scenario_id is None:
             click.echo(f"Available runs for {experiment_id}:")
             _list_runs(plan.runs)
-            click.echo("Use --all, --scenario SCENARIO, or --scenario SCENARIO --run-id RUN_ID to run.")
+            click.echo(
+                "Use --all, --scenario SCENARIO, or --scenario SCENARIO --run-id RUN_ID to run."
+            )
             return
         click.echo(f"Selected {len(plan.runs)} measurement(s) from {plan_file}")
         results = execute_test_plan(
@@ -248,7 +328,14 @@ def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refres
                 f"results already exist at {run.result_dir}"
             ),
         )
-    except (ValueError, OSError, RuntimeError, TimeoutError, KeyError, subprocess.CalledProcessError) as exc:
+    except (
+        ValueError,
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        KeyError,
+        subprocess.CalledProcessError,
+    ) as exc:
         raise click.ClickException(str(exc)) from exc
     for result in results:
         click.echo(
@@ -260,8 +347,15 @@ def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refres
             click.echo(f"Results: {result.result_dir}")
         else:
             click.echo("Results removed after unsuccessful run")
-    if any(result.timed_out or result.failures or result.completed_requests < result.expected_requests for result in results):
-        raise click.ClickException("One or more runs were incomplete or had request failures")
+    if any(
+        result.timed_out
+        or result.failures
+        or result.completed_requests < result.expected_requests
+        for result in results
+    ):
+        raise click.ClickException(
+            "One or more runs were incomplete or had request failures"
+        )
 
 
 if __name__ == "__main__":

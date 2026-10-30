@@ -13,12 +13,13 @@ setup: ## Install the editable package and report dependencies.
 
 format: ## Format Python files with Ruff.
 	$(UV) run --no-sync --with ruff ruff format .
+	$(UV) run --no-sync --with ruff ruff check --fix .
 
 lint: ## Lint Python files with Ruff.
 	$(UV) run --no-sync --with ruff ruff check .
 
 test: ## Run the test suite.
-	$(UV) run --no-sync --with pytest pytest
+	$(UV) run --no-sync --with pytest pytest -p no:anyio
 
 ls: ## List experiments and scenarios.
 	$(UV) run --no-sync pulp-juicer ls
