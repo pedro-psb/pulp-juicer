@@ -55,7 +55,7 @@ The Quarto report overlays one-second request-start counts on the completed-requ
 CPU percent is summed across PostgreSQL processes, so 100% means one fully used CPU core.
 Comparison plots are written under `_results/_comparison/$RUN_ID/`.
 `make report` renders one `_results/report.html` with a tab for each completed candidate run and an overview table.
-Each run tab groups metrics and run configuration under Summary, shows charts under Timeline, and links the source files used for the run.
+Each run tab shows Summary, Timeline, and source-file links, with Run configuration at the end.
 The completed-requests chart overlays active users; throughput and PostgreSQL CPU charts overlay cumulative completed requests on the right axis.
 It scans all run IDs, so `RUN_ID` is not required.
 It also writes `_results/report.qmd`; SVG charts remain in each run directory.
@@ -95,3 +95,8 @@ Normal pull-through adds each artifact to a repository version; staging collects
 - `plot_locust_results.py` writes comparison plots to `_results/_comparison/$RUN_ID/`.
 - `generate_reports.py` builds a combined Quarto report from Locust and PostgreSQL CPU CSV files.
 - `pyproject.toml` and `uv.lock` define the local Python tools.
+- `src/pulp_juicer/` contains the test-plan metadata, Compose execution, and Locust library driver installed by uv.
+- `src/experiments/maven_pull_through/` contains the declarative Maven experiment and its fixture.
+
+The experiment CLI uses `uv run --locked pulp-juicer ls` to list experiments and scenarios with short descriptions. `uv run --locked pulp-juicer show maven-pull-through` shows the experiment's full description, scenarios, candidates, and runs. `uv run --locked pulp-juicer run maven-pull-through` lists available runs and creates `_juice/plan-maven-pull-through.json` on first use; later calls reuse it. Add `--all` to run the experiment, `--scenario burst` for one scenario, or `--scenario burst --run-id run001` for one unit. Add `-f` to replace existing results for the selected runs. Use `--refresh-plan` after editing the experiment declaration. Fixtures and results also live under `_juice/`. Use `uv run --locked pulp-juicer ps` to see existing pulp-juicer services and `uv run --locked pulp-juicer clean` to remove their containers and networks. See [architecture](docs/architecture.md).
+The Makefile workflow above remains available for the existing two-candidate load test.

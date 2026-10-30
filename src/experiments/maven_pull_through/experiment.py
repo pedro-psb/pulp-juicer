@@ -3,33 +3,35 @@
 from pathlib import Path
 
 from pulp_juicer import (
-    AnalysisConfig,
     ExperimentConfig,
     LoadConfig,
     PluginSource,
+    RequireFixture,
     ScenarioConfig,
-    ServiceFixtureConfig,
 )
 
 from . import candidates, scenario_input
-from .service_maven_fixture import fixture
+from .service_maven_fixture.fixture import MavenServiceFixture
 
 
 EXPERIMENT = ExperimentConfig(
     id="maven-pull-through",
-    description="Compare Maven pull-through implementations under multiple loads.",
-    fixture=ServiceFixtureConfig(
-        compose_file=Path(__file__).resolve().parent / "service_maven_fixture/compose.yaml",
-        service="maven_fixture",
-        upstream_url="http://maven_fixture:8000/",
-        generate=fixture.generate,
-        options={"artifacts_per_run": 1000, "payload_bytes": 65536},
+    short_description="Compare Maven pull-through candidates under two load patterns.",
+    description=(
+        "Compare Maven pull-through implementations under burst and moderate request loads. "
+        "Each candidate serves artifacts from the same generated upstream fixture, allowing "
+        "response time and request completion to be compared across repeated runs."
+    ),
+    fixtures=(
+        MavenServiceFixture(
+            name="maven",
+            output_dir=Path("fixture/maven"),
+        ),
     ),
     candidates=(
         candidates.NormalCandidate(
             id=1,
             name="normal",
-            baseline=True,
             source=PluginSource(plugin="pulp_maven", git="../pulp_maven"),
         ),
         candidates.StagingCandidate(
@@ -49,7 +51,9 @@ EXPERIMENT = ExperimentConfig(
     scenarios=(
         ScenarioConfig(
             id="burst",
+            description="Thirty concurrent users request 650 unique Maven artifacts.",
             driver="http_get",
+            requires=(RequireFixture(name="maven", args={"count": 1000, "size": 65536}),),
             input=scenario_input.build_pull_through,
             runs=(1, 2, 3, "r", 3, 2, 1, "r", 2, 1, 3),
             load=LoadConfig(
@@ -65,7 +69,9 @@ EXPERIMENT = ExperimentConfig(
         ),
         ScenarioConfig(
             id="moderate",
+            description="Ten concurrent users request 200 unique Maven artifacts.",
             driver="http_get",
+            requires=(RequireFixture(name="maven", args={"count": 1000, "size": 65536}),),
             input=scenario_input.build_pull_through,
             runs=(1, 2, 3, "r", 3, 2, 1),
             load=LoadConfig(
@@ -79,10 +85,23 @@ EXPERIMENT = ExperimentConfig(
                 request_timeout_seconds=60,
             ),
         ),
-    ),
-    analysis=AnalysisConfig(
-        primary_metric="p95_response_time_ms",
-        lower_is_better=True,
-        minimum_practical_improvement_percent=10,
+        ScenarioConfig(
+            id="tmp",
+            description="Temporary experiments.",
+            driver="http_get",
+            requires=(RequireFixture(name="maven", args={"count": 1000, "size": 65536}),),
+            input=scenario_input.build_pull_through,
+            runs=(1,),
+            load=LoadConfig(
+                users=10,
+                request_count=120,
+                spawn_rate_per_second=10,
+                max_duration="5m",
+                wait_seconds=0,
+                idle_before_seconds=5,
+                tail_after_seconds=5,
+                request_timeout_seconds=60,
+            ),
+        ),
     ),
 )

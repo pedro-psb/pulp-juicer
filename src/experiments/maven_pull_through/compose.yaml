@@ -1,16 +1,13 @@
-include:
-  - path: service_maven_fixture/compose.yaml
-
 services:
   pulp:
     build:
-      context: ../..
-      dockerfile: experiments/maven_pull_through/Containerfile
+      context: ../../..
+      dockerfile: src/experiments/maven_pull_through/Containerfile
       args:
         BASE_TAG: ${PULP_BASE_TAG:-latest}
       additional_contexts:
-        pulpcore_src: ${PULPCORE_REPO:-../../../pulpcore}
-        maven_src: ${PULP_MAVEN_REPO:-../../../pulp_maven}
+        pulpcore_src: ${PULPCORE_REPO:-../../../../pulpcore}
+        maven_src: ${PULP_MAVEN_REPO:-../../../../pulp_maven}
     image: bucket-loadtest-pulp:local
     environment:
       PULP_SETTINGS: /etc/pulp/settings.py
@@ -25,7 +22,7 @@ services:
     ports:
       - "127.0.0.1:${PULP_PORT:-5001}:80"
     volumes:
-      - ../../settings:/etc/pulp:Z
+      - ../../../settings:/etc/pulp:Z
       - pulp_storage:/var/lib/pulp
       - pgsql:/var/lib/pgsql
       - containers:/var/lib/containers

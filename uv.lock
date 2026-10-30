@@ -183,8 +183,9 @@ wheels = [
 [[package]]
 name = "bucket-loadtest"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "locust" },
     { name = "packaging" },
 ]
@@ -196,6 +197,7 @@ report = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.5,<9" },
     { name = "locust" },
     { name = "packaging" },
 ]

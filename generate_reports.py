@@ -29,13 +29,58 @@ def markdown_value(value):
     return html.escape(str(value)).replace("|", "&#124;").replace("\n", " ")
 
 
-def chart(path, title, y_label, points, color, minimum_y=1, overlay=None, overlay_label="Active users", request_starts=None):
+def run_configuration(metadata, history):
+    fixture = metadata["fixture"]
+    load = metadata["load"]
+    lines = [
+        "### Run configuration",
+        "",
+        "| Setting | Value |",
+        "|:--|:--|",
+        f'| Fixture COUNT (artifacts for candidate) | {fixture["count"]} |',
+        f'| Fixture ID requested at setup | {markdown_value(fixture["requested_fixture_id"])} |',
+        f'| Payload bytes requested at setup | {fixture["requested_payload_bytes"]} |',
+        f'| Concurrent users (configured) | {load["users"]} |',
+        f'| Peak active users (observed) | {max(int(row["User Count"]) for row in history) if history else "N/A"} |',
+        f'| Spawn rate | {load["spawn_rate"]} users/s |',
+        f'| Maximum duration | {markdown_value(load["duration"])} |',
+        f'| Wait between requests | {load["wait_seconds"]} s |',
+        f'| Idle before load | {load["idle_seconds"]} s |',
+        f'| Tail after load | {load["tail_seconds"]} s |',
+        f'| Distribution URL | {markdown_value(metadata["setup"]["base_url"])} |',
+        f'| Upstream URL | {markdown_value(metadata["upstream_url"])} |',
+        f'| Docker Compose project | {markdown_value(metadata["project"])} |',
+        f'| Fixture SHA256 | {fixture["manifest_sha256"]} |',
+        "",
+        "#### Software sources",
+        "",
+        "| Component | Source | Git commit or ref | Local changes |",
+        "|:--|:--|:--|:--|",
+    ]
+    for name, source in metadata["sources"].items():
+        dirty = source["dirty"]
+        changes = "N/A" if dirty is None else "Yes" if dirty else "No"
+        lines.append(
+            f'| {markdown_value(name)} | {markdown_value(source["source"])} | '
+            f'{markdown_value(source["revision"])} | {changes} |'
+        )
+    lines.append("")
+    if fixture["requested_count"] != fixture["count"]:
+        lines += [
+            f'The fixture already existed at setup: COUNT={fixture["requested_count"]} was requested, '
+            f'and {fixture["count"]} artifacts were available for this candidate.',
+            "",
+        ]
+    return lines
+
+
+def chart(path, title, y_label, points, color, minimum_y=1, overlay=None, overlay_label="Completed requests", request_starts=None):
     if not points:
         return False
     overlay = overlay or []
     request_starts = request_starts or []
-    width, height = 900, 340
-    left, right, top, bottom = 72, 68 if overlay or request_starts else 24, 42, 52
+    width, height = 900, 360
+    left, right, top, bottom = 86, 95 if overlay or request_starts else 24, 45, 65
     plot_width = width - left - right
     plot_height = height - top - bottom
     x_max = max(1, max(x for x, _ in points), *(x for x, _ in overlay), *(x for x, _ in request_starts))
@@ -55,10 +100,14 @@ def chart(path, title, y_label, points, color, minimum_y=1, overlay=None, overla
     for index in range(5):
         value = x_max * index / 4
         x = xy(value, 0)[0]
-        grid.append(f'<text x="{x:.1f}" y="{height-24}" text-anchor="middle">{value:.0f}s</text>')
+        grid.append(f'<text x="{x:.1f}" y="{height-bottom+19}" text-anchor="middle">{value:.0f}</text>')
 
     right_svg = ""
     bars_svg = ""
+    legend = [
+        f'<line x1="{left}" y1="22" x2="{left+24}" y2="22" stroke="{color}" stroke-width="3"/>',
+        f'<text x="{left+32}" y="26">{html.escape(title)}</text>',
+    ]
     if overlay or request_starts:
         right_max = max(1, *(value for _, value in overlay), *(count for _, count in request_starts))
         labels = "".join(
@@ -66,32 +115,39 @@ def chart(path, title, y_label, points, color, minimum_y=1, overlay=None, overla
             for fraction in (0, 0.5, 1)
         )
         right_svg = f'<g font-family="sans-serif" font-size="12" fill="#64748b">{labels}</g>'
+        right_label = overlay_label if overlay else "New requests per second"
+        if overlay and request_starts:
+            right_label += " / new requests per second"
+        right_svg += (
+            f'<line x1="{width-right}" y1="{top}" x2="{width-right}" y2="{height-bottom}" stroke="#94a3b8"/>'
+            f'<text x="{width-14}" y="{top+plot_height/2:.1f}" '
+            f'transform="rotate(90 {width-14} {top+plot_height/2:.1f})" text-anchor="middle" '
+            f'font-family="sans-serif" font-size="12" fill="#475569">{html.escape(right_label)}</text>'
+        )
         if request_starts:
             bar_width = plot_width / x_max
+            legend_x = left + (540 if overlay else 270)
             bars_svg = "".join(
                 f'<rect x="{xy(x, 0)[0]:.1f}" y="{top + plot_height * (1 - count / right_max):.1f}" '
                 f'width="{bar_width * 0.85:.1f}" height="{plot_height * count / right_max:.1f}" '
                 'fill="#7c3aed" opacity="0.7"/>'
                 for x, count in request_starts if count
             )
-            right_svg += (
-                f'<rect x="{width-right-290}" y="15" width="11" height="11" fill="#7c3aed" opacity="0.7"/>'
-                f'<text x="{width-right-273}" y="26" font-family="sans-serif" font-size="12" fill="#64748b">Started/s</text>'
-            )
+            legend += [
+                f'<rect x="{legend_x}" y="16" width="12" height="12" fill="#7c3aed" opacity="0.7"/>',
+                f'<text x="{legend_x+20}" y="26">New requests per second (right)</text>',
+            ]
         if overlay:
-            stepped = []
-            for x, value in overlay:
-                if stepped:
-                    stepped.append((x, stepped[-1][1]))
-                stepped.append((x, value))
             load_coordinates = " ".join(
                 f"{left + plot_width * x / x_max:.1f},{top + plot_height * (1 - value / right_max):.1f}"
-                for x, value in stepped
+                for x, value in overlay
             )
+            legend += [
+                f'<line x1="{left+270}" y1="22" x2="{left+294}" y2="22" '
+                'stroke="#64748b" stroke-width="2" stroke-dasharray="5 5"/>',
+                f'<text x="{left+302}" y="26">{html.escape(overlay_label)} (right)</text>',
+            ]
             right_svg += (
-                f'<line x1="{width-right-183}" y1="22" x2="{width-right-159}" y2="22" '
-                'stroke="#64748b" stroke-width="2" stroke-dasharray="5 5" opacity="0.65"/>'
-                f'<text x="{width-right-152}" y="26" font-family="sans-serif" font-size="12" fill="#64748b">{html.escape(overlay_label)} (right axis)</text>'
                 f'<polyline points="{load_coordinates}" fill="none" stroke="#64748b" '
                 'stroke-width="2" stroke-dasharray="5 5" opacity="0.55"/>'
             )
@@ -101,15 +157,22 @@ def chart(path, title, y_label, points, color, minimum_y=1, overlay=None, overla
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
         f'role="img" aria-label="{html.escape(title, quote=True)}">'
         '<rect width="100%" height="100%" fill="#fff"/>'
-        f'<text x="{left}" y="27" font-family="sans-serif" font-size="19" fill="#172033">{html.escape(title)}</text>'
+        '<g font-family="sans-serif" font-size="12" fill="#475569">'
+        + "".join(legend) + '</g>'
         '<g font-family="sans-serif" font-size="12" fill="#475569">'
         + "".join(grid)
-        + '</g>' + bars_svg
+        + '</g>'
+        + f'<line x1="{left}" y1="{top}" x2="{left}" y2="{height-bottom}" stroke="#94a3b8"/>'
+        + f'<line x1="{left}" y1="{height-bottom}" x2="{width-right}" y2="{height-bottom}" stroke="#94a3b8"/>'
+        + bars_svg
         + f'<polyline points="{coordinates}" fill="none" stroke="{color}" stroke-width="3" '
         'stroke-linecap="round" stroke-linejoin="round"/>'
         + right_svg
-        + f'<text x="{left}" y="{height-4}" font-family="sans-serif" font-size="12" fill="#475569">'
-        f'Seconds from recording start · {html.escape(y_label)}</text></svg>\n'
+        + f'<text x="{left+plot_width/2:.1f}" y="{height-9}" text-anchor="middle" '
+        'font-family="sans-serif" font-size="12" fill="#475569">Time since recording start (s)</text>'
+        + f'<text x="20" y="{top+plot_height/2:.1f}" '
+        f'transform="rotate(-90 20 {top+plot_height/2:.1f})" text-anchor="middle" '
+        f'font-family="sans-serif" font-size="12" fill="#475569">{html.escape(y_label)}</text></svg>\n'
     )
     path.write_text(svg)
     return True
@@ -126,6 +189,7 @@ def request_starts_per_second(rows, timeline_start, timeline_end):
 
 def prepare_run(run_dir, results_dir):
     candidate, run_id = run_dir.parent.name, run_dir.name
+    scenario = run_dir.parent.parent.name if run_dir.parent.parent != results_dir else None
     def asset(name):
         return f"{run_dir.relative_to(results_dir).as_posix()}/{name}"
     metadata_path = run_dir / "run_metadata.json"
@@ -138,7 +202,7 @@ def prepare_run(run_dir, results_dir):
         raise ValueError(f"No aggregated Locust stats in {run_dir}")
 
     lines = [
-        f"Candidate: **{candidate}**. Run: **{run_id}**.",
+        f"Candidate: **{candidate}**. " + (f"Scenario: **{scenario}**. " if scenario else "") + f"Run: **{run_id}**.",
         "",
         "### Summary",
         "",
@@ -157,48 +221,6 @@ def prepare_run(run_dir, results_dir):
         "Response time covers the HTTP request; later autocommit is excluded.",
         "",
     ]
-    if metadata:
-        fixture = metadata["fixture"]
-        load = metadata["load"]
-        lines += [
-            "#### Run configuration",
-            "",
-            "| Setting | Value |",
-            "|:--|:--|",
-            f'| Fixture COUNT (artifacts for candidate) | {fixture["count"]} |',
-            f'| Fixture ID requested at setup | {markdown_value(fixture["requested_fixture_id"])} |',
-            f'| Payload bytes requested at setup | {fixture["requested_payload_bytes"]} |',
-            f'| Concurrent users (configured) | {load["users"]} |',
-            f'| Peak active users (observed) | {max(int(row["User Count"]) for row in history) if history else "N/A"} |',
-            f'| Spawn rate | {load["spawn_rate"]} users/s |',
-            f'| Maximum duration | {markdown_value(load["duration"])} |',
-            f'| Wait between requests | {load["wait_seconds"]} s |',
-            f'| Idle before load | {load["idle_seconds"]} s |',
-            f'| Tail after load | {load["tail_seconds"]} s |',
-            f'| Distribution URL | {markdown_value(metadata["setup"]["base_url"])} |',
-            f'| Upstream URL | {markdown_value(metadata["upstream_url"])} |',
-            f'| Docker Compose project | {markdown_value(metadata["project"])} |',
-            f'| Fixture SHA256 | {fixture["manifest_sha256"]} |',
-            "",
-            "#### Software sources",
-            "",
-            "| Component | Source | Git commit or ref | Local changes |",
-            "|:--|:--|:--|:--|",
-        ]
-        for name, source in metadata["sources"].items():
-            dirty = source["dirty"]
-            changes = "N/A" if dirty is None else "Yes" if dirty else "No"
-            lines.append(
-                f'| {markdown_value(name)} | {markdown_value(source["source"])} | '
-                f'{markdown_value(source["revision"])} | {changes} |'
-            )
-        lines.append("")
-        if fixture["requested_count"] != fixture["count"]:
-            lines += [
-                f'The fixture already existed at setup: COUNT={fixture["requested_count"]} was requested, '
-                f'and {fixture["count"]} artifacts were available for this candidate.',
-                "",
-            ]
     timeline = ["### Timeline", ""]
     completed_timestamps = []
 
@@ -207,7 +229,6 @@ def prepare_run(run_dir, results_dir):
             start = int(history[0]["Timestamp"])
             completed_timestamps = [(int(row["Timestamp"]), int(row["Total Request Count"])) for row in history]
             completed = [(timestamp - start, count) for timestamp, count in completed_timestamps]
-            user_load = [(int(row["Timestamp"]) - start, int(row["User Count"])) for row in history]
             throughput = [(completed[0][0], 0)]
             for (previous_time, previous_count), (now, count) in zip(completed, completed[1:]):
                 throughput.append((now, (count - previous_count) / max(1, now - previous_time)))
@@ -219,16 +240,16 @@ def prepare_run(run_dir, results_dir):
                         csv.DictReader(source), start, int(history[-1]["Timestamp"]) - start
                     )
             chart(
-                run_dir / "report_completed.svg", "Completed requests", "requests", completed,
-                "#2563eb", overlay=user_load, request_starts=starts,
+                run_dir / "report_completed.svg", "Completed requests", "Completed requests (count)", completed,
+                "#2563eb", request_starts=starts,
             )
             chart(
-                run_dir / "report_throughput.svg", "Completed requests per second", "requests/s",
-                throughput, "#e56b35", overlay=completed, overlay_label="Completed",
+                run_dir / "report_throughput.svg", "Completed requests per second", "Throughput (requests/s)",
+                throughput, "#e56b35", overlay=completed, overlay_label="Completed requests",
             )
-            caption = "The completed-requests chart overlays active users; the throughput chart overlays cumulative completed requests. Dashed gray curves use the right axes. Idle and tail periods remain visible."
+            caption = "The throughput chart overlays cumulative completed requests. Dashed gray overlays use the right axes. Idle and tail periods remain visible."
             if starts is not None:
-                caption = "Purple bars on the completed-requests chart count starts per second. " + caption
+                caption = "Purple bars on the completed-requests chart show new requests per second. " + caption
             timeline += [
                 "#### Requests",
                 "",
@@ -267,8 +288,8 @@ def prepare_run(run_dir, results_dir):
                     cpu_start = datetime.fromisoformat(cpu[0]["timestamp_utc"]).timestamp() - samples[0][0]
                     cpu_completed = [(max(0, timestamp - cpu_start), count) for timestamp, count in completed_timestamps]
                 chart(
-                    run_dir / "report_db_cpu.svg", "PostgreSQL CPU", "% of one core",
-                    samples, "#16a34a", 100, overlay=cpu_completed, overlay_label="Completed",
+                    run_dir / "report_db_cpu.svg", "PostgreSQL CPU", "PostgreSQL CPU (% of one core)",
+                    samples, "#16a34a", 100, overlay=cpu_completed, overlay_label="Completed requests",
                 )
                 timeline += ["#### PostgreSQL CPU", ""]
                 if cpu_completed:
@@ -280,7 +301,8 @@ def prepare_run(run_dir, results_dir):
     lines += timeline
     lines += ["### Source files", ""]
     for name, label in (
-        ("run_metadata.json", "Run configuration and source commits or refs"),
+        ("run_metadata.json", "Run configuration, setup, sources, and result"),
+        ("data_load.csv", "Requests selected for this run"),
         ("manifest.json", "Fixture manifest used for this run"),
         ("setup.json", "Pulp repository and distribution setup"),
         ("locust_stats.csv", "Locust summary CSV"),
@@ -292,6 +314,8 @@ def prepare_run(run_dir, results_dir):
         if (run_dir / name).is_file():
             lines.append(f"- [{label}]({asset(name)})")
     lines.append("")
+    if metadata:
+        lines += run_configuration(metadata, history)
 
     return stats, lines
 
@@ -299,17 +323,18 @@ def prepare_run(run_dir, results_dir):
 def completed_runs(results):
     if not results.is_dir():
         return
-    for candidate_dir in sorted(results.iterdir()):
-        if not candidate_dir.is_dir() or candidate_dir.name.startswith("_"):
+    stats_files = [*results.glob("*/*/locust_stats.csv"), *results.glob("*/*/*/locust_stats.csv")]
+    for run_dir in sorted(stats_files):
+        run_dir = run_dir.parent
+        relative = run_dir.relative_to(results)
+        if len(relative.parts) not in (2, 3) or any(part.startswith("_") for part in relative.parts):
             continue
-        for run_dir in sorted(candidate_dir.iterdir()):
-            if run_dir.is_dir() and (run_dir / "locust_stats.csv").is_file():
-                yield run_dir
+        yield run_dir
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results", type=Path, default=Path("_results"))
+    parser.add_argument("--results", type=Path, default=Path("_juice/results"))
     parser.add_argument("--quarto", default="quarto")
     args = parser.parse_args()
     runs = list(completed_runs(args.results))
@@ -332,18 +357,20 @@ def main():
         "",
         "# Overview",
         "",
-        "| Run | Candidate | Requests | Failures | Mean response (ms) | p95 (ms) |",
-        "|:--|:--|--:|--:|--:|--:|",
+        "| Scenario | Run | Candidate | Requests | Failures | Mean response (ms) | p95 (ms) |",
+        "|:--|:--|:--|--:|--:|--:|--:|",
     ]
     sections = []
     for run_dir in runs:
         stats, body = prepare_run(run_dir, args.results)
+        scenario = run_dir.parent.parent.name if len(run_dir.relative_to(args.results).parts) == 3 else ""
         lines.append(
-            f"| {run_dir.name} | {run_dir.parent.name} | {stats['Request Count']} | "
+            f"| {scenario} | {run_dir.name} | {run_dir.parent.name} | {stats['Request Count']} | "
             f"{stats['Failure Count']} | {number(stats, 'Average Response Time')} | "
             f"{number(stats, '95%')} |"
         )
-        sections.extend([f"## {run_dir.parent.name} / {run_dir.name}", "", *body])
+        heading = f"{scenario} / " if scenario else ""
+        sections.extend([f"## {heading}{run_dir.parent.name} / {run_dir.name}", "", *body])
     lines.extend(["", "# Runs", "", "::: {.panel-tabset}", "", *sections, ":::", ""])
     source = args.results / "report.qmd"
     source.write_text("\n".join(lines))

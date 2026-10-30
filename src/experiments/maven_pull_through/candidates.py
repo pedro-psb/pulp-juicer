@@ -2,18 +2,25 @@
 
 import re
 
-from pulp_juicer import CandidateConfig, PulpClient, PulpConnection
+from pulp_juicer import CandidateConfig, PulpClient, PulpConnection, ServiceFixtureMetadata
 
 
 
-def setup_maven(connection: PulpConnection, fixture: dict, run_id: str, *, staging_enabled: bool, staging_autocommit: bool) -> dict:
+def setup_maven(
+    connection: PulpConnection,
+    fixture: ServiceFixtureMetadata,
+    run_id: str,
+    *,
+    staging_enabled: bool,
+    staging_autocommit: bool,
+) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
         raise ValueError("Run ID must contain only letters, numbers, underscores, or hyphens")
     client = PulpClient(connection)
     name = f"loadtest-{run_id}"
     remote = client.create(
         "/pulp/api/v3/remotes/maven/maven/",
-        {"name": f"{name}-remote", "url": fixture["upstream_url"].rstrip("/") + "/"},
+        {"name": f"{name}-remote", "url": fixture.url.rstrip("/") + "/"},
     )["pulp_href"]
     repository = client.create(
         "/pulp/api/v3/repositories/maven/maven/",
@@ -32,21 +39,27 @@ def setup_maven(connection: PulpConnection, fixture: dict, run_id: str, *, stagi
 
 
 class NormalCandidate(CandidateConfig):
-    def setup(self, connection: PulpConnection, fixture_context: dict, run_id: str) -> dict:
+    def setup(
+        self, connection: PulpConnection, fixtures: dict[str, ServiceFixtureMetadata], run_id: str
+    ) -> dict:
         return setup_maven(
-            connection, fixture_context, run_id, staging_enabled=False, staging_autocommit=False
+            connection, fixtures["maven"], run_id, staging_enabled=False, staging_autocommit=False
         )
 
 
 class StagingCandidate(CandidateConfig):
-    def setup(self, connection: PulpConnection, fixture_context: dict, run_id: str) -> dict:
+    def setup(
+        self, connection: PulpConnection, fixtures: dict[str, ServiceFixtureMetadata], run_id: str
+    ) -> dict:
         return setup_maven(
-            connection, fixture_context, run_id, staging_enabled=True, staging_autocommit=True
+            connection, fixtures["maven"], run_id, staging_enabled=True, staging_autocommit=True
         )
 
 
 class StagingManualCandidate(CandidateConfig):
-    def setup(self, connection: PulpConnection, fixture_context: dict, run_id: str) -> dict:
+    def setup(
+        self, connection: PulpConnection, fixtures: dict[str, ServiceFixtureMetadata], run_id: str
+    ) -> dict:
         return setup_maven(
-            connection, fixture_context, run_id, staging_enabled=True, staging_autocommit=False
+            connection, fixtures["maven"], run_id, staging_enabled=True, staging_autocommit=False
         )

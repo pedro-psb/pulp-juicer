@@ -1,5 +1,7 @@
 # Generated load-test data and results
 _results/
+_juice/
+run-files/
 fixture/
 setup.json
 *.csv

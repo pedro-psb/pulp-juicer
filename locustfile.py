@@ -6,6 +6,7 @@ import itertools
 import json
 import math
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -15,21 +16,96 @@ from locust import HttpUser, constant, events, task
 from locust.exception import StopUser
 from locust.stats import update_stats_history
 
-from db_cpu_monitor import DBCpuMonitor
+from pulp_juicer.db_cpu_monitor import DBCpuMonitor
+
+
+@dataclass(frozen=True)
+class RequestInput:
+    path: str
+    sha256: str
+    expected_status: int
+    name: str
+
+
+@dataclass(frozen=True)
+class ScenarioInput:
+    candidate: str
+    base_url: str
+    requests: tuple[RequestInput, ...]
+    wait_seconds: float
+    request_timeout_seconds: float
+
+
+def _scenario_input_from_json(path: Path) -> ScenarioInput:
+    raw = json.loads(path.read_text())
+    candidate_name = raw.get("candidate", os.environ.get("CANDIDATE", "custom"))
+    requests = tuple(
+        RequestInput(
+            path=request["path"],
+            sha256=request["sha256"],
+            expected_status=int(request.get("expected_status", 200)),
+            name=request.get("name", f"pull-through/{candidate_name}"),
+        )
+        for request in raw["requests"]
+    )
+    return ScenarioInput(
+        candidate=candidate_name,
+        base_url=raw["base_url"].rstrip("/"),
+        requests=requests,
+        wait_seconds=float(raw.get("wait_seconds", 0)),
+        request_timeout_seconds=float(raw.get("request_timeout_seconds", 60)),
+    )
+
+
+def build_scenario_input(
+    setup: dict,
+    manifest: dict,
+    candidate: str,
+    *,
+    content_origin: str | None = None,
+    wait_seconds: float = 0,
+    request_timeout_seconds: float = 60,
+) -> ScenarioInput:
+    distribution_url = setup[candidate]["base_url"].rstrip("/")
+    if content_origin:
+        distribution_url = content_origin.rstrip("/") + urlsplit(distribution_url).path.rstrip("/")
+    requests = tuple(
+        RequestInput(
+            path=artifact["path"],
+            sha256=artifact["sha256"],
+            expected_status=200,
+            name=f"pull-through/{candidate}",
+        )
+        for artifact in manifest[candidate]
+    )
+    return ScenarioInput(
+        candidate=candidate,
+        base_url=distribution_url,
+        requests=requests,
+        wait_seconds=wait_seconds,
+        request_timeout_seconds=request_timeout_seconds,
+    )
 
 
 candidate = os.environ.get("CANDIDATE", "normal")
-if candidate not in {"staging", "normal"}:
-    raise ValueError("CANDIDATE must be staging or normal")
-
-run_dir = Path("_results") / "_run" / os.environ.get("RUN_ID", "local001")
-config = json.loads(Path(os.environ.get("SETUP_JSON", run_dir / "setup.json")).read_text())
-manifest = json.loads(Path(os.environ.get("MANIFEST_JSON", "fixture/manifest.json")).read_text())
-artifacts = manifest[candidate]
+scenario_input_path = os.environ.get("SCENARIO_INPUT_JSON")
+if scenario_input_path:
+    scenario_input = _scenario_input_from_json(Path(scenario_input_path))
+else:
+    if candidate not in {"staging", "normal"}:
+        raise ValueError("CANDIDATE must be staging or normal")
+    run_dir = Path("_results") / "_run" / os.environ.get("RUN_ID", "local001")
+    config = json.loads(Path(os.environ.get("SETUP_JSON", run_dir / "setup.json")).read_text())
+    manifest = json.loads(Path(os.environ.get("MANIFEST_JSON", "fixture/manifest.json")).read_text())
+    scenario_input = build_scenario_input(
+        setup=config,
+        manifest=manifest,
+        candidate=candidate,
+        content_origin=os.environ.get("CONTENT_ORIGIN"),
+        wait_seconds=float(os.environ.get("WAIT_SECONDS", "0")),
+    )
+request_names = {request.name for request in scenario_input.requests}
 indices = itertools.count()
-distribution_url = config[candidate]["base_url"].rstrip("/")
-if origin := os.environ.get("CONTENT_ORIGIN"):
-    distribution_url = origin.rstrip("/") + urlsplit(distribution_url).path.rstrip("/")
 
 db_cpu_monitor = None
 request_log = None
@@ -56,7 +132,7 @@ def start_request_log(environment, **kwargs):
 
 @events.request.add_listener
 def record_request(request_type, name, response_time, response, exception, start_time, url, context, response_length, **kwargs):
-    if request_writer is None or request_type != "GET" or name != f"pull-through/{candidate}":
+    if request_writer is None or request_type != "GET" or name not in request_names:
         return
     request_writer.writerow((
         datetime.fromtimestamp(start_time, timezone.utc).isoformat(timespec="microseconds"),
@@ -126,33 +202,35 @@ def quit_when_complete(environment, **kwargs):
     @environment.events.request.add_listener
     def count_request(request_type, name, **kwargs):
         nonlocal completed
-        if request_type != "GET" or name != f"pull-through/{candidate}":
+        if request_type != "GET" or name not in request_names:
             return
         completed += 1
-        if completed == len(artifacts):
+        if completed == len(scenario_input.requests):
             gevent.spawn(environment.runner.quit)
 
 
 class PullThroughUser(HttpUser):
-    host = distribution_url
-    wait_time = constant(float(os.environ.get("WAIT_SECONDS", "0")))
+    host = scenario_input.base_url
+    wait_time = constant(scenario_input.wait_seconds)
 
     @task
     def fetch_artifact(self):
         index = next(indices)
-        if index >= len(artifacts):
+        if index >= len(scenario_input.requests):
             raise StopUser()
 
-        artifact = artifacts[index]
+        request_input = scenario_input.requests[index]
         with self.client.get(
-            f"{distribution_url}/{artifact['path']}",
-            name=f"pull-through/{candidate}",
-            context={"artifact_path": artifact["path"]},
+            f"{scenario_input.base_url}/{request_input.path}",
+            name=request_input.name,
+            context={"artifact_path": request_input.path},
             catch_response=True,
-            timeout=60,
+            timeout=scenario_input.request_timeout_seconds,
         ) as response:
-            if response.status_code != 200:
-                response.failure(f"HTTP {response.status_code}: {artifact['path']}")
-            elif hashlib.sha256(response.content).hexdigest() != artifact["sha256"]:
-                response.failure(f"SHA256 mismatch: {artifact['path']}")
+            if response.status_code != request_input.expected_status:
+                response.failure(
+                    f"HTTP {response.status_code}, expected {request_input.expected_status}: {request_input.path}"
+                )
+            elif hashlib.sha256(response.content).hexdigest() != request_input.sha256:
+                response.failure(f"SHA256 mismatch: {request_input.path}")
 
