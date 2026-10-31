@@ -3,14 +3,14 @@
 `experiment.py` defines fixture instances, candidates, scenarios, and run order.
 Candidate IDs are positive integers.
 Each scenario uses its own `request_count`, which may be less than the fixture capacity.
-The burst scenario runs each candidate three times; the moderate scenario runs each twice.
+The burst scenario runs normal and staging twice; the moderate scenario runs each candidate twice.
 `"r"` removes Pulp volumes before the next run. The generated fixture data remains on disk.
 
 ## Candidate sources
 
-Every candidate declares a plugin and Git source.
-A relative source uses the repository root, so `../pulp_maven` selects the sibling checkout.
-A Git URL selects a remote ref; replace the example `your-fork` URL with the branch under test.
+The experiment requires `pulpcore` and `pulp_maven`; every candidate supplies a source for each.
+A relative source uses the repository root, so `../pulpcore` and `../pulp_maven` select sibling checkouts.
+A Git URL selects a remote ref; the staging candidate uses `pulp/pulp_maven` at tag `0.37.0`.
 Infrastructure resolves each source, installs it, and starts Pulp before invoking candidate setup.
 
 ## Files
@@ -21,9 +21,9 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - `Containerfile` builds Pulp with the selected pulpcore and plugin source contexts.
 - `settings/settings.py` configures Pulp for this experiment's Compose service.
 - `candidates.py` defines candidate classes that implement `setup` and configure the Maven resources using `pulp_juicer.PulpClient`.
-- `service_maven_fixture/compose.yaml` defines the upstream HTTP service.
-- `service_maven_fixture/fixture.py` implements `MavenServiceFixture.build` and `generate_metadata`.
-  Run it as a module to generate a small fixture and print its metadata: `python -m experiments.maven_pull_through.service_maven_fixture.fixture --count 10 --size 1024`.
+- `data_service/compose.yaml` defines the upstream HTTP service.
+- `data_service/fixture.py` implements `MavenServiceFixture.build` and `generate_metadata`.
+  Run it as a module to generate a small fixture and print its metadata: `python -m experiments.maven_pull_through.data_service.fixture --count 10 --size 1024`.
 - `scenario_input.py` combines fixture and candidate setup results with the load into a serializable request specification.
 
 Each scenario declares its fixture dependencies with `RequireFixture(name, args)`.
@@ -54,6 +54,6 @@ uv run --locked pulp-juicer run maven-pull-through --scenario burst --run-id run
 uv run --locked --group report pulp-juicer report
 ```
 
-Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. The example staging candidate still has a placeholder Git URL; set its source in `experiment.py` before running with `--refresh-plan`.
+Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. Use `--refresh-plan` after changing candidate sources in `experiment.py`.
 Add `-f` to rerun selected units whose result directories already exist.
 

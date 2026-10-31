@@ -5,13 +5,12 @@ from pathlib import Path
 from pulp_juicer import (
     ExperimentConfig,
     LoadConfig,
-    PluginSource,
     RequireFixture,
     ScenarioConfig,
 )
 
 from . import candidates, scenario_input
-from .service_maven_fixture.fixture import MavenServiceFixture
+from .data_service.fixture import MavenServiceFixture
 
 EXPERIMENT = ExperimentConfig(
     id="maven-pull-through",
@@ -21,6 +20,7 @@ EXPERIMENT = ExperimentConfig(
         "Each candidate serves artifacts from the same generated upstream fixture, allowing "
         "response time and request completion to be compared across repeated runs."
     ),
+    required_sources=("pulpcore", "pulp_maven"),
     fixtures=(
         MavenServiceFixture(
             name="maven",
@@ -31,20 +31,18 @@ EXPERIMENT = ExperimentConfig(
         candidates.NormalCandidate(
             id=1,
             name="normal",
-            source=PluginSource(plugin="pulp_maven", git="../pulp_maven"),
+            sources={
+                "pulpcore": "../pulpcore",
+                "pulp_maven": "https://github.com/pulp/pulp_maven.git#0.37.0",
+            },
         ),
         candidates.StagingCandidate(
             id=2,
             name="staging",
-            source=PluginSource(
-                plugin="pulp_maven",
-                git="https://github.com/your-fork/pulp_maven.git#staging-branch",
-            ),
-        ),
-        candidates.StagingManualCandidate(
-            id=3,
-            name="staging-manual",
-            source=PluginSource(plugin="pulp_maven", git="../pulp_maven"),
+            sources={
+                "pulpcore": "../pulpcore",
+                "pulp_maven": "https://github.com/pulp/pulp_maven.git#0.37.0",
+            },
         ),
     ),
     scenarios=(
@@ -56,7 +54,7 @@ EXPERIMENT = ExperimentConfig(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            runs=(1, 2, 3, "r", 3, 2, 1, "r", 2, 1, 3),
+            runs=(1, 1, "r", 2, 2),
             load=LoadConfig(
                 users=30,
                 request_count=650,
@@ -76,7 +74,7 @@ EXPERIMENT = ExperimentConfig(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            runs=(1, 2, 3, "r", 3, 2, 1),
+            runs=(1, 2, "r", 2, 1),
             load=LoadConfig(
                 users=10,
                 request_count=200,

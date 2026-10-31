@@ -12,7 +12,6 @@ from pulp_juicer.execution import _write_run_context, execute_test_plan
 from pulp_juicer.plan import RunMetadata, RunResultMetadata
 from pulp_juicer.types import (
     LoadConfig,
-    PluginSource,
     PulpConnection,
     ServiceFixtureMetadata,
 )
@@ -32,7 +31,7 @@ class TestExecution(unittest.TestCase):
             candidate = SimpleNamespace(
                 id=1,
                 name="normal",
-                source=PluginSource(plugin="pulp_maven", git="../pulp_maven"),
+                sources={"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
             )
             fixture = ServiceFixtureMetadata(
                 name="maven",
@@ -70,12 +69,15 @@ class TestExecution(unittest.TestCase):
                 20.0,
                 False,
             )
-            plan = SimpleNamespace(pulpcore_source="../pulpcore")
             with patch(
                 "pulp_juicer.execution.source_details", return_value={"revision": "abc"}
             ):
                 _write_run_context(
-                    plan, run, result, {"base_url": "http://pulp/"}, root, root, "smoke"
+                    run,
+                    result,
+                    {"base_url": "http://pulp/"},
+                    {"pulpcore": root, "pulp_maven": root},
+                    "smoke",
                 )
 
             self.assertEqual(
@@ -90,6 +92,7 @@ class TestExecution(unittest.TestCase):
             self.assertEqual(metadata["setup"]["base_url"], "http://pulp/")
             self.assertEqual(metadata["result"]["p95_response_ms"], 20.0)
             self.assertEqual(metadata["fixture"]["count"], 1)
+            self.assertEqual(set(metadata["sources"]), {"pulpcore", "pulp_maven"})
 
     def test_report_metadata_failure_removes_new_results(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,7 +101,7 @@ class TestExecution(unittest.TestCase):
             candidate = SimpleNamespace(
                 id=1,
                 name="normal",
-                source=PluginSource(plugin="pulp_maven", git="../pulp_maven"),
+                sources={"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
                 setup=Mock(return_value={"base_url": "http://example.test/"}),
             )
             run = RunMetadata(
@@ -119,9 +122,9 @@ class TestExecution(unittest.TestCase):
             )
             plan = SimpleNamespace(
                 runs=(run,),
+                experiment=SimpleNamespace(required_sources=("pulpcore", "pulp_maven")),
                 repository_root=root,
                 results_dir=root,
-                pulpcore_source="../pulpcore",
                 pulp_connection=PulpConnection(),
                 compose_command=("docker", "compose"),
                 compose_file=root / "pulp.yaml",
@@ -148,7 +151,8 @@ class TestExecution(unittest.TestCase):
                 patch(
                     "pulp_juicer.execution._write_run_context",
                     side_effect=OSError("write failed"),
-                ),self.assertRaisesRegex(OSError, "write failed")
+                ),
+                self.assertRaisesRegex(OSError, "write failed"),
             ):
                 execute_test_plan(plan)
             self.assertFalse(output.exists())
@@ -180,7 +184,7 @@ class TestExecution(unittest.TestCase):
             candidate = SimpleNamespace(
                 id=1,
                 name="normal",
-                source=PluginSource(plugin="pulp_maven", git="../pulp_maven"),
+                sources={"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
                 setup=Mock(return_value={"base_url": "http://example.test/"}),
             )
             run = RunMetadata(
@@ -201,9 +205,9 @@ class TestExecution(unittest.TestCase):
             )
             plan = SimpleNamespace(
                 runs=(run,),
+                experiment=SimpleNamespace(required_sources=("pulpcore", "pulp_maven")),
                 repository_root=root,
                 results_dir=root,
-                pulpcore_source="../pulpcore",
                 pulp_connection=PulpConnection(),
                 compose_command=("docker", "compose"),
                 compose_file=root / "pulp.yaml",
@@ -278,7 +282,16 @@ class TestExecution(unittest.TestCase):
             candidate = SimpleNamespace(
                 id=1,
                 name="normal",
-                source=PluginSource(plugin="pulp_maven", git="../pulp_maven"),
+                sources={"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
+                setup=Mock(return_value={"base_url": "http://example.test/"}),
+            )
+            alternate = SimpleNamespace(
+                id=2,
+                name="alternate",
+                sources={
+                    "pulpcore": "../alternate-pulpcore",
+                    "pulp_maven": "../pulp_maven",
+                },
                 setup=Mock(return_value={"base_url": "http://example.test/"}),
             )
             load = LoadConfig(users=1, spawn_rate_per_second=1, max_duration="1s")
@@ -292,7 +305,7 @@ class TestExecution(unittest.TestCase):
                 RunMetadata(
                     "smoke",
                     "small",
-                    candidate,
+                    candidate if number == 1 else alternate,
                     f"run{number:03d}",
                     {"fixture": details},
                     (fixture,),
@@ -306,9 +319,9 @@ class TestExecution(unittest.TestCase):
             )
             plan = SimpleNamespace(
                 runs=runs,
+                experiment=SimpleNamespace(required_sources=("pulpcore", "pulp_maven")),
                 repository_root=root,
                 results_dir=root,
-                pulpcore_source="../pulpcore",
                 pulp_connection=PulpConnection(),
                 compose_command=("docker", "compose"),
                 compose_file=root / "pulp.yaml",
@@ -335,7 +348,8 @@ class TestExecution(unittest.TestCase):
             with (
                 patch("pulp_juicer.execution.ComposeRuntime") as runtime_type,
                 patch(
-                    "pulp_juicer.execution.resolve_source", return_value=root / "source"
+                    "pulp_juicer.execution.resolve_source",
+                    side_effect=lambda source, *args: root / source.removeprefix("../"),
                 ) as resolve,
                 patch(
                     "pulp_juicer.execution.run_locust", side_effect=fake_locust
@@ -357,14 +371,22 @@ class TestExecution(unittest.TestCase):
             )
             self.assertEqual(runtime_type.return_value.ensure.call_count, 2)
             self.assertEqual(locust.call_count, 2)
-            self.assertEqual(resolve.call_count, 2)
+            self.assertEqual(resolve.call_count, 3)
+            ensure_calls = runtime_type.return_value.ensure.call_args_list
+            self.assertEqual(
+                ensure_calls[0].args[1]["PULPCORE_REPO"], str(root / "pulpcore")
+            )
+            self.assertEqual(
+                ensure_calls[1].args[1]["PULPCORE_REPO"],
+                str(root / "alternate-pulpcore"),
+            )
             self.assertEqual(runtime_type.return_value.close.call_count, 3)
             self.assertEqual(
                 progress,
                 [
                     "Starting small/run001 normal",
                     "Locust: 0/1 requests",
-                    "Starting small/run002 normal",
+                    "Starting small/run002 alternate",
                     "Locust: 0/1 requests",
                 ],
             )

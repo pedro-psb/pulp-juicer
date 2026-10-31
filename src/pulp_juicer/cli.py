@@ -4,16 +4,21 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import click
+from rich.console import Console
+from rich.text import Text
 
 from .catalog import experiments
 from .execution import execute_test_plan
 from .plan import build_test_plan, resolve_workdir
 from .plan_file import load_plan_file, write_plan_file
 from .report import render_report
+from .sources import public_source
 from .types import PulpConnection
 
 
@@ -22,32 +27,57 @@ def cli():
     """Manage Pulp load-test plans."""
 
 
+def _print_styled(*parts):
+    line = Text()
+    for part in parts:
+        if isinstance(part, tuple):
+            value, style = part
+            line.append(str(value), style=style)
+        else:
+            line.append(str(part))
+    Console(file=sys.stdout, highlight=False).print(line, soft_wrap=True)
+
+
 def _list_runs(runs):
     current_scenario = None
     for run in runs:
         if run.scenario_id != current_scenario:
             current_scenario = run.scenario_id
-            click.echo(f"  {current_scenario}:")
-        click.echo(f"    {run.run_id}  {run.candidate.name}")
+            _print_styled("  ", (current_scenario, "bold green"), ":")
+        _print_styled(
+            "    ", (run.run_id, "yellow"), "  ", (run.candidate.name, "cyan")
+        )
 
 
 def _list_run_columns(runs):
     scenario_width = max(len("SCENARIO"), *(len(run.scenario_id) for run in runs))
     run_width = max(len("RUN_ID"), *(len(run.run_id) for run in runs))
-    click.echo(f"  {'SCENARIO':<{scenario_width}}  {'RUN_ID':<{run_width}}  CANDIDATE")
+    _print_styled(
+        "  ",
+        (f"{'SCENARIO':<{scenario_width}}  {'RUN_ID':<{run_width}}  CANDIDATE", "bold"),
+    )
     for run in runs:
-        click.echo(
-            f"  {run.scenario_id:<{scenario_width}}  {run.run_id:<{run_width}}  {run.candidate.name}"
+        _print_styled(
+            "  ",
+            (f"{run.scenario_id:<{scenario_width}}", "green"),
+            "  ",
+            (f"{run.run_id:<{run_width}}", "yellow"),
+            "  ",
+            (run.candidate.name, "cyan"),
         )
+
+
+def _list_experiments():
+    for experiment, _ in experiments().values():
+        _print_styled((experiment.id, "bold cyan"), ": ", experiment.short_description)
+        for scenario in experiment.scenarios:
+            _print_styled("  ", (scenario.id, "green"), ": ", scenario.description)
 
 
 @cli.command("ls")
 def list_experiments():
     """List the available experiments and their scenarios."""
-    for experiment, _ in experiments().values():
-        click.echo(f"{experiment.id}: {experiment.short_description}")
-        for scenario in experiment.scenarios:
-            click.echo(f"  {scenario.id}: {scenario.description}")
+    _list_experiments()
 
 
 @cli.command("show")
@@ -58,21 +88,32 @@ def show_experiment(experiment_id):
     if experiment_id not in registry:
         raise click.ClickException(f"Unknown experiment: {experiment_id}")
     experiment, compose_file = registry[experiment_id]
-    click.echo(f"{experiment.id}: {experiment.description}")
-    click.echo("Scenarios:")
+    _print_styled((experiment.id, "bold cyan"), ": ", experiment.description)
+    _print_styled(
+        ("Required sources: ", "bold magenta"), ", ".join(experiment.required_sources)
+    )
+    _print_styled(("Scenarios:", "bold magenta"))
     for scenario in experiment.scenarios:
         count = sum(isinstance(value, int) for value in scenario.runs)
-        click.echo(
-            f"  {scenario.id}: {scenario.description} ({count} runs, {scenario.load.users} users)"
+        _print_styled(
+            "  ",
+            (scenario.id, "green"),
+            ": ",
+            scenario.description,
+            (f" ({count} runs, {scenario.load.users} users)", "dim"),
         )
-    click.echo("Candidates:")
+    _print_styled(("Candidates:", "bold magenta"))
     for candidate in experiment.candidates:
-        click.echo(f"  {candidate.id}: {candidate.name}")
+        _print_styled("  ", (candidate.id, "yellow"), ": ", (candidate.name, "cyan"))
+        for name in experiment.required_sources:
+            _print_styled(
+                "    ", (name, "green"), ": ", public_source(candidate.sources[name])
+            )
     try:
         plan = build_test_plan(experiment, compose_file)
     except (ValueError, OSError, KeyError) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo("Runs:")
+    _print_styled(("Runs:", "bold magenta"))
     _list_run_columns(plan.runs)
 
 
@@ -127,13 +168,13 @@ def list_results(experiment_id, workdir):
             recorded_experiment is None
             and metadata.get("project") == f"pulp-juicer-{experiment_id}"
         ):
-            click.echo(metadata_file.parent)
+            _print_styled((metadata_file.parent, "cyan"))
             found = True
     if found:
         for name in ("report.html", "report.qmd"):
             report_file = results_dir / name
             if report_file.is_file():
-                click.echo(report_file)
+                _print_styled((report_file, "magenta"))
     else:
         click.echo(f"No results found for {experiment_id} under {results_dir}")
 
@@ -219,35 +260,121 @@ def list_services(docker_command):
         *(service[1:] for service in sorted(services, key=lambda item: item[1:4])),
     ]
     widths = [max(len(row[index]) for row in rows) for index in range(4)]
-    for row in rows:
-        click.echo(
-            "  ".join(
-                f"{value:<{widths[index]}}" for index, value in enumerate(row[:4])
+    for index, row in enumerate(rows):
+        if index == 0:
+            _print_styled(
+                (
+                    "  ".join(
+                        f"{value:<{widths[column]}}"
+                        for column, value in enumerate(row[:4])
+                    )
+                    + f"  {row[4]}",
+                    "bold",
+                )
             )
-            + f"  {row[4]}"
+            continue
+        _print_styled(
+            (f"{row[0]:<{widths[0]}}", "cyan"),
+            "  ",
+            (f"{row[1]:<{widths[1]}}", "green"),
+            "  ",
+            f"{row[2]:<{widths[2]}}",
+            "  ",
+            (
+                f"{row[3]:<{widths[3]}}",
+                "green" if row[3].startswith("Up") else "yellow",
+            ),
+            "  ",
+            row[4],
         )
+
+
+def _clean_targets(value):
+    targets = [part.strip() for part in value.split(",")]
+    valid = {"services", "results", "fixtures"}
+    if targets == ["all"]:
+        return valid
+    if "all" in targets:
+        raise click.BadParameter("'all' cannot be combined with other targets")
+    unknown = set(targets) - valid
+    if unknown:
+        raise click.BadParameter(
+            f"Unknown target(s): {', '.join(sorted(unknown))}. "
+            "Choose services, results, fixtures, or all"
+        )
+    return set(targets)
+
+
+def _remove_output_dir(path):
+    try:
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            raise click.ClickException(f"Expected a directory: {path}")
+        else:
+            return False
+    except OSError as exc:
+        raise click.ClickException(f"Cannot remove {path}: {exc}") from exc
+    return True
 
 
 @cli.command("clean")
+@click.argument("targets", required=False)
+@click.option(
+    "--workdir",
+    type=click.Path(path_type=Path),
+    default=Path("_juice"),
+    show_default=True,
+)
 @click.option("--docker-command", envvar="DOCKER", default="docker", show_default=True)
-def clean_services(docker_command):
-    """Remove all pulp-juicer containers and Compose networks."""
-    executable = _docker_prefix(docker_command)
-    containers = _compose_containers(executable)
-    networks = _compose_networks(executable)
-    if containers:
-        _docker_output(
-            executable, "container", "rm", "--force", *(item[0] for item in containers)
+def clean(targets, workdir, docker_command):
+    """Remove services, results, fixtures, all, or a comma separated selection."""
+    if targets is None:
+        raise click.UsageError(
+            "Missing argument 'TARGETS'.\n"
+            "Available targets: services, results, fixtures, all.\n"
+            "Combine targets with commas, e.g. results,fixtures."
         )
-    if networks:
-        _docker_output(executable, "network", "rm", *(item[0] for item in networks))
-    click.echo(
-        f"Removed {len(containers)} container(s) and {len(networks)} network(s)."
-    )
+    selected = _clean_targets(targets)
+    root = None
+    if selected & {"results", "fixtures"}:
+        if workdir.is_absolute():
+            root = workdir
+        else:
+            first_experiment = next(iter(experiments().values()), None)
+            if first_experiment is None:
+                raise click.ClickException("No experiment available to resolve workdir")
+            root = resolve_workdir(first_experiment[1], workdir)
+    if "services" in selected:
+        executable = _docker_prefix(docker_command)
+        containers = _compose_containers(executable)
+        networks = _compose_networks(executable)
+        if containers:
+            _docker_output(
+                executable,
+                "container",
+                "rm",
+                "--force",
+                *(item[0] for item in containers),
+            )
+        if networks:
+            _docker_output(executable, "network", "rm", *(item[0] for item in networks))
+        click.echo(
+            f"Removed {len(containers)} container(s) and {len(networks)} network(s)."
+        )
+
+    if selected & {"results", "fixtures"}:
+        for target, directory in (("results", "results"), ("fixtures", "fixture")):
+            if target in selected:
+                path = root / directory
+                removed = _remove_output_dir(path)
+                click.echo(f"{'Removed' if removed else 'No'} {target} at {path}")
 
 
 @cli.command("run")
-@click.argument("experiment_id")
+@click.argument("experiment_id", required=False)
 @click.option(
     "--workdir",
     type=click.Path(path_type=Path),
@@ -270,6 +397,9 @@ def clean_services(docker_command):
 )
 def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refresh_plan):
     """List available runs, or execute a selected experiment scope."""
+    if experiment_id is None:
+        _list_experiments()
+        raise click.UsageError("Missing argument 'EXPERIMENT_ID'.")
     registry = experiments()
     if experiment_id not in registry:
         raise click.ClickException(f"Unknown experiment: {experiment_id}")
@@ -281,38 +411,27 @@ def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refres
     plan_file = resolve_workdir(compose_file, workdir) / f"plan-{experiment_id}.json"
     try:
         if refresh_plan or not plan_file.is_file():
-            previous = load_plan_file(plan_file) if plan_file.is_file() else None
-            command = (
-                previous.compose_command
-                if previous
-                else tuple(shlex.split(os.environ.get("COMPOSE", "docker compose")))
-            )
+            command = tuple(shlex.split(os.environ.get("COMPOSE", "docker compose")))
             if not command:
                 raise ValueError("Compose command must not be empty")
             prepared = build_test_plan(
                 experiment,
                 compose_file,
                 workdir=workdir,
-                pulp_connection=(
-                    previous.pulp_connection
-                    if previous
-                    else PulpConnection(
-                        password=os.environ.get("PULP_PASSWORD", "password")
-                    )
+                pulp_connection=PulpConnection(
+                    password=os.environ.get("PULP_PASSWORD", "password")
                 ),
-                pulpcore_source=previous.pulpcore_source
-                if previous
-                else os.environ.get("PULPCORE_REPO", "../pulpcore"),
                 compose_command=command,
-                ready_timeout_seconds=previous.ready_timeout_seconds
-                if previous
-                else 300,
             )
             write_plan_file(prepared)
             click.echo(f"Prepared {len(prepared.runs)} runs: {plan_file}")
         plan = load_plan_file(plan_file, scenario_id=scenario_id, run_id=run_id)
         if not run_all and scenario_id is None:
-            click.echo(f"Available runs for {experiment_id}:")
+            _print_styled(
+                ("Available runs for ", "bold magenta"),
+                (experiment_id, "bold cyan"),
+                (":", "bold magenta"),
+            )
             _list_runs(plan.runs)
             click.echo(
                 "Use --all, --scenario SCENARIO, or --scenario SCENARIO --run-id RUN_ID to run."

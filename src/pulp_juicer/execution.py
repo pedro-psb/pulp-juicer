@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from .compose_runtime import ComposeRuntime
 from .locust_driver import run as run_locust
 from .plan import RunMetadata, RunResultMetadata, TestPlanMetadata
-from .sources import plugin_environment_name, resolve_source, source_details
+from .sources import resolve_source, source_details, source_environment_name
 from .types import ServiceFixtureMetadata, VolumeFixtureMetadata
 
 
@@ -45,9 +45,7 @@ def _compose_inputs(plan: TestPlanMetadata, run: RunMetadata):
     return tuple(dict.fromkeys(files)), environment
 
 
-def _write_run_context(
-    plan, run, result, candidate_data, pulpcore, plugin_path, project
-):
+def _write_run_context(run, result, candidate_data, source_paths, project):
     """Keep the run configuration, setup, sources, and result in one metadata file."""
     output = result.result_dir
     fixture_build = run.fixture_builds[0] if run.fixture_builds else None
@@ -84,10 +82,8 @@ def _write_run_context(
             "request_count": run.load.request_count,
         },
         "sources": {
-            "pulpcore": source_details(plan.pulpcore_source, pulpcore),
-            run.candidate.source.plugin: source_details(
-                run.candidate.source.git, plugin_path
-            ),
+            name: source_details(source, source_paths[name])
+            for name, source in run.candidate.sources.items()
         },
         "project": project,
         "upstream_url": fixture.url
@@ -120,11 +116,11 @@ def execute_test_plan(
     sources = {}
     results = []
 
-    def source_path(source: str, plugin: str) -> Path:
-        key = (source, plugin)
+    def source_path(source: str, name: str) -> Path:
+        key = (source, name)
         if key not in sources:
             sources[key] = resolve_source(
-                source, plugin, plan.repository_root, plan.results_dir
+                source, name, plan.repository_root, plan.results_dir
             )
         return sources[key]
 
@@ -152,20 +148,23 @@ def execute_test_plan(
                         fixture.build()
                         built.add(fixture.output_dir)
                 files, environment = _compose_inputs(plan, run)
-                pulpcore = source_path(plan.pulpcore_source, "pulpcore")
-                plugin = run.candidate.source.plugin
-                plugin_path = source_path(run.candidate.source.git, plugin)
+                source_paths = {
+                    name: source_path(run.candidate.sources[name], name)
+                    for name in plan.experiment.required_sources
+                }
                 environment.update(
                     {
-                        "PULPCORE_REPO": str(pulpcore),
-                        plugin_environment_name(plugin): str(plugin_path),
+                        **{
+                            source_environment_name(name): str(path)
+                            for name, path in source_paths.items()
+                        },
                         "PULP_PORT": str(
                             urlsplit(plan.pulp_connection.base_url).port or 5001
                         ),
                         "PULP_PASSWORD": plan.pulp_connection.password,
                     }
                 )
-                runtime.ensure(files, environment, (plugin, plugin_path))
+                runtime.ensure(files, environment, source_paths)
                 candidate_run_id = (
                     f"{run.scenario_id}-{run.run_id}-{run.candidate.name}"
                 )
@@ -174,8 +173,7 @@ def execute_test_plan(
                 )
                 context.update(
                     candidate_data=candidate_data,
-                    pulpcore=pulpcore,
-                    plugin_path=plugin_path,
+                    source_paths=source_paths,
                 )
                 return run.input_builder(run.fixtures, candidate_data, run.load)
 
@@ -196,12 +194,10 @@ def execute_test_plan(
             ):
                 try:
                     _write_run_context(
-                        plan,
                         run,
                         result,
                         context["candidate_data"],
-                        context["pulpcore"],
-                        context["plugin_path"],
+                        context["source_paths"],
                         runtime.project,
                     )
                 except BaseException:

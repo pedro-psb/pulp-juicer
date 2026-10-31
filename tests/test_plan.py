@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -35,9 +36,9 @@ class TestPlan(unittest.TestCase):
             self.assertEqual(len(plan.runs), TOTAL_RUNS)
             self.assertEqual(
                 [run.restart_before for run in plan.runs if run.scenario_id == "burst"],
-                [True, False, False, True, False, False, True, False, False],
+                [True, False, True, False],
             )
-            self.assertEqual([run.candidate.id for run in plan.runs[:3]], [1, 2, 3])
+            self.assertEqual([run.candidate.id for run in plan.runs[:3]], [1, 1, 2])
             self.assertEqual(len({run.result_dir for run in plan.runs}), len(plan.runs))
             fixture = plan.runs[0].fixtures["maven"]
             self.assertTrue(fixture.output_dir.is_absolute())
@@ -76,6 +77,19 @@ class TestPlan(unittest.TestCase):
             plan.runs[0].result_dir.mkdir(parents=True)
             repeated = build_test_plan(EXPERIMENT, COMPOSE, **options)
             self.assertEqual(repeated.runs[0].result_dir, plan.runs[0].result_dir)
+
+    def test_candidates_must_supply_every_required_source(self):
+        candidate = EXPERIMENT.candidates[0]
+        missing = replace(candidate, sources={"pulpcore": "../pulpcore"})
+        with self.assertRaisesRegex(ValueError, "missing=\\['pulp_maven'\\]"):
+            replace(EXPERIMENT, candidates=(missing,))
+
+        extra = replace(
+            candidate,
+            sources={**candidate.sources, "pulp_python": "../pulp_python"},
+        )
+        with self.assertRaisesRegex(ValueError, "extra=\\['pulp_python'\\]"):
+            replace(EXPERIMENT, candidates=(extra,))
 
 
 class TestCli(unittest.TestCase):
@@ -184,7 +198,7 @@ class TestCli(unittest.TestCase):
             return SimpleNamespace(stdout="")
 
         with patch("pulp_juicer.cli.subprocess.run", side_effect=docker):
-            result = CliRunner().invoke(cli, ["clean"])
+            result = CliRunner().invoke(cli, ["clean", "services"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Removed 1 container(s) and 1 network(s).", result.output)
         self.assertEqual(
@@ -196,15 +210,70 @@ class TestCli(unittest.TestCase):
         with patch(
             "pulp_juicer.cli.subprocess.run", return_value=SimpleNamespace(stdout="")
         ) as docker:
-            result = CliRunner().invoke(cli, ["clean"])
+            result = CliRunner().invoke(cli, ["clean", "services"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Removed 0 container(s) and 0 network(s).", result.output)
         self.assertEqual(docker.call_count, 2)
+
+    def test_clean_selected_data_keeps_plan_and_skips_docker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "_juice"
+            results = workdir / "results"
+            fixtures = workdir / "fixture"
+            results.mkdir(parents=True)
+            fixtures.mkdir()
+            (results / "run_metadata.json").write_text("result")
+            (fixtures / "manifest.json").write_text("fixture")
+            plan_file = workdir / "plan-maven-pull-through.json"
+            plan_file.write_text("plan")
+            with patch("pulp_juicer.cli.subprocess.run") as docker:
+                response = CliRunner().invoke(
+                    cli, ["clean", "results,fixtures", "--workdir", str(workdir)]
+                )
+            self.assertEqual(response.exit_code, 0, response.output)
+            self.assertFalse(results.exists())
+            self.assertFalse(fixtures.exists())
+            self.assertTrue(plan_file.is_file())
+            docker.assert_not_called()
+
+    def test_clean_all_removes_data_and_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "_juice"
+            (workdir / "results").mkdir(parents=True)
+            (workdir / "fixture").mkdir()
+            with patch(
+                "pulp_juicer.cli.subprocess.run",
+                return_value=SimpleNamespace(stdout=""),
+            ) as docker:
+                response = CliRunner().invoke(
+                    cli, ["clean", "all", "--workdir", str(workdir)]
+                )
+            self.assertEqual(response.exit_code, 0, response.output)
+            self.assertFalse((workdir / "results").exists())
+            self.assertFalse((workdir / "fixture").exists())
+            self.assertEqual(docker.call_count, 2)
+
+    def test_clean_requires_valid_target(self):
+        missing = CliRunner().invoke(cli, ["clean"])
+        self.assertEqual(missing.exit_code, 2)
+        self.assertIn(
+            "Available targets: services, results, fixtures, all.", missing.output
+        )
+        self.assertIn("results,fixtures", missing.output)
+        for arguments in (["unknown"], ["all,results"], ["results,"]):
+            response = CliRunner().invoke(cli, ["clean", *arguments])
+            self.assertEqual(response.exit_code, 2)
+            self.assertIn("Usage:", response.output)
 
     def test_ls_and_single_plan_scopes(self):
         runner = CliRunner()
         listed = runner.invoke(cli, ["ls"])
         self.assertEqual(listed.exit_code, 0, listed.output)
+        run_without_experiment = runner.invoke(cli, ["run"])
+        self.assertEqual(run_without_experiment.exit_code, 2)
+        self.assertIn(listed.output, run_without_experiment.output)
+        self.assertIn("Usage:", run_without_experiment.output)
+        self.assertIn("Missing argument 'EXPERIMENT_ID'", run_without_experiment.output)
         self.assertIn(
             "maven-pull-through: Compare Maven pull-through candidates under two load patterns.",
             listed.output,
@@ -230,8 +299,9 @@ class TestCli(unittest.TestCase):
             shown.output,
         )
         self.assertIn("response time and request completion", shown.output)
+        self.assertIn("Required sources: pulpcore, pulp_maven", shown.output)
         self.assertIn(
-            "burst: Thirty concurrent users request 650 unique Maven artifacts. (9 runs, 30 users)",
+            "burst: Thirty concurrent users request 650 unique Maven artifacts. (4 runs, 30 users)",
             shown.output,
         )
         self.assertIn("  1: normal\n", shown.output)
@@ -242,7 +312,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(run_rows[0], ["SCENARIO", "RUN_ID", "CANDIDATE"])
         self.assertEqual(len(run_rows[1:]), TOTAL_RUNS)
         self.assertEqual(run_rows[1], ["burst", "run001", "normal"])
-        self.assertEqual(run_rows[10], ["moderate", "run001", "normal"])
+        self.assertEqual(run_rows[5], ["moderate", "run001", "normal"])
         self.assertIn(["moderate", "run006", "normal"], run_rows)
         unknown = runner.invoke(cli, ["show", "missing"])
         self.assertNotEqual(unknown.exit_code, 0)
@@ -257,7 +327,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(list(workdir.glob("*.json")), [plan_file])
             self.assertEqual(len(load_plan_file(plan_file).runs), TOTAL_RUNS)
             self.assertEqual(
-                len(load_plan_file(plan_file, scenario_id="burst").runs), 9
+                len(load_plan_file(plan_file, scenario_id="burst").runs), 4
             )
             selected = load_plan_file(plan_file, scenario_id="burst", run_id="run001")
             self.assertEqual(
@@ -271,15 +341,21 @@ class TestCli(unittest.TestCase):
             self.assertEqual(selected.runs[0].fixture_builds[0].count, 1000)
             self.assertEqual(selected.runs[0].load.users, 30)
             edited = json.loads(plan_file.read_text())
+            self.assertEqual(edited["required_sources"], ["pulpcore", "pulp_maven"])
+            self.assertEqual(
+                edited["scenarios"][0]["runs"][0]["candidate"]["sources"],
+                {"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
+            )
             edited["scenarios"][0]["runs"][0]["load"]["users"] = 3
-            edited["scenarios"][0]["runs"][0]["candidate"]["source"]["git"] = (
+            edited["scenarios"][0]["runs"][0]["candidate"]["sources"]["pulp_maven"] = (
                 "../alternate-pulp-maven"
             )
             plan_file.write_text(json.dumps(edited))
             selected = load_plan_file(plan_file, scenario_id="burst", run_id="run001")
             self.assertEqual(selected.runs[0].load.users, 3)
             self.assertEqual(
-                selected.runs[0].candidate.source.git, "../alternate-pulp-maven"
+                selected.runs[0].candidate.sources["pulp_maven"],
+                "../alternate-pulp-maven",
             )
             with self.assertRaisesRegex(ValueError, "requires a scenario"):
                 load_plan_file(plan_file, run_id="run001")
@@ -393,7 +469,7 @@ class TestCli(unittest.TestCase):
 
                 scenario = CliRunner().invoke(cli, [*command, "--scenario", "burst"])
                 self.assertEqual(scenario.exit_code, 0, scenario.output)
-                self.assertEqual(len(execute.call_args.args[0].runs), 9)
+                self.assertEqual(len(execute.call_args.args[0].runs), 4)
 
             conflicting = CliRunner().invoke(
                 cli, [*command, "--all", "--scenario", "burst"]
@@ -423,11 +499,14 @@ class TestCli(unittest.TestCase):
             self.assertNotIn("Prepared", reused.output)
             self.assertEqual(load_plan_file(plan_file).runs[0].load.users, 3)
 
+            stored = json.loads(plan_file.read_text())
+            stored["version"] = 2
+            plan_file.write_text(json.dumps(stored))
             refreshed = runner.invoke(cli, [*command, "--refresh-plan"])
             self.assertEqual(refreshed.exit_code, 0, refreshed.output)
             plan = load_plan_file(plan_file)
             self.assertEqual(plan.runs[0].load.users, 30)
-            self.assertEqual(plan.pulp_connection.base_url, "http://127.0.0.1:9999")
+            self.assertEqual(plan.pulp_connection.base_url, "http://127.0.0.1:5001")
 
 
 if __name__ == "__main__":

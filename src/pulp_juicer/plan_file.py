@@ -10,13 +10,12 @@ from .catalog import experiments
 from .plan import RunMetadata, TestPlanMetadata
 from .types import (
     LoadConfig,
-    PluginSource,
     PulpConnection,
     ServiceFixtureMetadata,
     VolumeFixtureMetadata,
 )
 
-VERSION = 2
+VERSION = 3
 
 
 def _unit(run: RunMetadata) -> dict:
@@ -52,13 +51,13 @@ def write_plan_file(plan: TestPlanMetadata) -> Path:
         "version": VERSION,
         "kind": "plan",
         "experiment": plan.experiment.id,
+        "required_sources": list(plan.experiment.required_sources),
         "runtime": {
             "repository_root": str(plan.repository_root),
             "workdir": str(plan.workdir),
             "compose_file": str(plan.compose_file),
             "results_dir": str(plan.results_dir),
             "pulp_connection": asdict(plan.pulp_connection),
-            "pulpcore_source": plan.pulpcore_source,
             "compose_command": list(plan.compose_command),
             "ready_timeout_seconds": plan.ready_timeout_seconds,
         },
@@ -87,10 +86,8 @@ def _hydrate_run(
     candidate_id = candidate_data["id"]
     if candidate_id not in candidates:
         raise ValueError(f"Unknown candidate ID: {candidate_id}")
-    candidate = replace(
-        candidates[candidate_id],
-        **{**candidate_data, "source": PluginSource(**candidate_data["source"])},
-    )
+    candidate = replace(candidates[candidate_id], **candidate_data)
+    experiment.validate_candidate_sources(candidate)
     fixtures = {}
     for name, data in unit["fixtures"].items():
         values = {key: value for key, value in data.items() if key != "kind"}
@@ -134,12 +131,16 @@ def load_plan_file(
         raise ValueError("A run ID requires a scenario")
     data = json.loads(Path(path).read_text())
     if data.get("version") != VERSION or data.get("kind") != "plan":
-        raise ValueError(f"Unsupported plan file: {path}")
+        raise ValueError(f"Unsupported plan file: {path}. Run with --refresh-plan")
     experiment_id = data["experiment"]
     registry = experiments()
     if experiment_id not in registry:
         raise ValueError(f"Unknown experiment: {experiment_id}")
     experiment, _ = registry[experiment_id]
+    if tuple(data["required_sources"]) != experiment.required_sources:
+        raise ValueError(
+            f"Required sources changed for {experiment_id}; refresh the plan"
+        )
     scenarios = {item.id: item for item in experiment.scenarios}
     candidates = {item.id: item for item in experiment.candidates}
     templates = {item.name: item for item in experiment.fixtures}
@@ -181,7 +182,6 @@ def load_plan_file(
         compose_file=Path(runtime["compose_file"]),
         results_dir=Path(runtime["results_dir"]),
         pulp_connection=PulpConnection(**runtime["pulp_connection"]),
-        pulpcore_source=runtime["pulpcore_source"],
         compose_command=tuple(runtime["compose_command"]),
         ready_timeout_seconds=runtime["ready_timeout_seconds"],
         runs=tuple(selected),

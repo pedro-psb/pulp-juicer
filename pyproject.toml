@@ -6,6 +6,7 @@ dependencies = [
     "click>=8.5,<9",
     "locust",
     "packaging",
+    "rich>=15.0.0",
 ]
 
 [project.scripts]

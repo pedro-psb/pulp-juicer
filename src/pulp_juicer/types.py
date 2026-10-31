@@ -1,16 +1,11 @@
 """Configuration and extension points used by a pulp_juicer experiment."""
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-
-@dataclass(frozen=True)
-class PluginSource:
-    plugin: str
-    git: str
 
 
 @dataclass(frozen=True)
@@ -73,7 +68,7 @@ class VolumeFixture(Fixture, ABC):
 class CandidateConfig(ABC):
     id: int
     name: str
-    source: PluginSource
+    sources: Mapping[str, str]
 
     @abstractmethod
     def setup(
@@ -119,6 +114,34 @@ class ExperimentConfig:
     id: str
     short_description: str
     description: str
+    required_sources: tuple[str, ...]
     fixtures: tuple[Fixture, ...]
     candidates: tuple[CandidateConfig, ...]
     scenarios: tuple[ScenarioConfig, ...]
+
+    def __post_init__(self):
+        if "pulpcore" not in self.required_sources:
+            raise ValueError("Experiment must require pulpcore")
+        if len(set(self.required_sources)) != len(self.required_sources):
+            raise ValueError("Experiment has duplicate required source names")
+        for name in self.required_sources:
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+                raise ValueError(f"Invalid source name: {name!r}")
+        for candidate in self.candidates:
+            self.validate_candidate_sources(candidate)
+
+    def validate_candidate_sources(self, candidate: CandidateConfig):
+        required = set(self.required_sources)
+        supplied = set(candidate.sources)
+        if required != supplied:
+            missing = sorted(required - supplied)
+            extra = sorted(supplied - required)
+            raise ValueError(
+                f"Candidate {candidate.name!r} sources differ from experiment requirements: "
+                f"missing={missing}, extra={extra}"
+            )
+        for name, source in candidate.sources.items():
+            if not source:
+                raise ValueError(
+                    f"Candidate {candidate.name!r} has no source for {name}"
+                )

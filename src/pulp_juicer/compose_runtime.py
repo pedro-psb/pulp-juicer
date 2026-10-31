@@ -19,7 +19,7 @@ class ComposeRuntime:
         ).strip("-")[:63]
         self.files: tuple[Path, ...] = ()
         self.environment: dict[str, str] = {}
-        self.source: tuple[str, Path] | None = None
+        self.sources: dict[str, Path] = {}
         self.started = False
 
     def command(
@@ -64,7 +64,7 @@ class ComposeRuntime:
         self,
         files: tuple[Path, ...],
         environment: dict[str, str],
-        source: tuple[str, Path],
+        sources: Mapping[str, Path],
     ):
         service_env = {
             key: value
@@ -88,7 +88,7 @@ class ComposeRuntime:
         if not self.started:
             self.command(files, environment, "up", "--detach", "--build", "--wait")
             self.started = True
-        elif self.source != source:
+        elif self.sources != sources:
             self.command(
                 files,
                 environment,
@@ -99,7 +99,7 @@ class ComposeRuntime:
                 "--wait",
                 "pulp",
             )
-        self.source = source
+        self.sources = dict(sources)
         PulpClient(self.plan.pulp_connection).wait_ready(
             self.plan.ready_timeout_seconds
         )

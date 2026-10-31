@@ -44,7 +44,6 @@ class TestPlanMetadata:
     compose_file: Path
     results_dir: Path
     pulp_connection: PulpConnection
-    pulpcore_source: str
     compose_command: tuple[str, ...]
     ready_timeout_seconds: float
     runs: tuple[RunMetadata, ...]
@@ -130,7 +129,6 @@ def build_test_plan(
     results_dir: Path | None = None,
     repository_root: Path | None = None,
     pulp_connection: PulpConnection | None = None,
-    pulpcore_source: str = "../pulpcore",
     compose_command: tuple[str, ...] = ("docker", "compose"),
     ready_timeout_seconds: float = 300,
     scenario_id: str | None = None,
@@ -212,7 +210,6 @@ def build_test_plan(
         compose_file=compose_file,
         results_dir=results_dir,
         pulp_connection=pulp_connection or PulpConnection(),
-        pulpcore_source=pulpcore_source,
         compose_command=tuple(compose_command),
         ready_timeout_seconds=ready_timeout_seconds,
         runs=tuple(runs),
