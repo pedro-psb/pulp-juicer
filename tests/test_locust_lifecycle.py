@@ -1,4 +1,4 @@
-"""Locust lifecycle hooks bracket an individual measurement."""
+"""The Python wrapper brackets each Locust measurement."""
 
 import csv
 import hashlib
@@ -9,6 +9,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pulp_juicer.locust_driver import run
 from pulp_juicer.plan import RunMetadata
@@ -16,7 +17,7 @@ from pulp_juicer.types import LoadConfig
 
 
 class TestLocustLifecycle(unittest.TestCase):
-    def test_failed_request_removes_results(self):
+    def test_failed_request_keeps_results(self):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(500)
@@ -49,7 +50,6 @@ class TestLocustLifecycle(unittest.TestCase):
                     ),
                     "http_get",
                     lambda *args: {},
-                    True,
                     Path(tmp) / "result",
                 )
                 result = run(
@@ -62,10 +62,36 @@ class TestLocustLifecycle(unittest.TestCase):
                     monitor_cpu=False,
                 )
                 self.assertEqual(result.failures, 1)
-                self.assertFalse(metadata.result_dir.exists())
+                self.assertEqual(result.completed_requests, 1)
+                self.assertTrue((metadata.result_dir / "locust_failures.csv").is_file())
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_completed_run_with_failures_keeps_artifacts_without_socket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = RunMetadata(
+                "smoke",
+                "small",
+                SimpleNamespace(id=1, name="normal"),
+                "run001",
+                {},
+                (),
+                LoadConfig(users=1, spawn_rate_per_second=1, max_duration="5s"),
+                "http_get",
+                lambda *args: {},
+                Path(tmp) / "result",
+            )
+            result = SimpleNamespace(
+                failures=1,
+                timed_out=False,
+                completed_requests=1,
+                expected_requests=1,
+            )
+            with patch("pulp_juicer.locust_driver._run_created", return_value=result):
+                actual = run(metadata, dict, lambda: None)
+            self.assertIs(actual, result)
+            self.assertTrue(metadata.result_dir.is_dir())
 
     def test_start_before_requests_and_stop_after(self):
         events = []
@@ -105,12 +131,14 @@ class TestLocustLifecycle(unittest.TestCase):
                     ),
                     "http_get",
                     lambda *args: {},
-                    True,
                     Path(tmp) / "result",
                 )
 
                 def start():
                     events.append("start")
+                    self.assertFalse(
+                        (metadata.result_dir / "locust_stats_history.csv").exists()
+                    )
                     return {
                         "base_url": f"http://127.0.0.1:{server.server_port}",
                         "requests": [
@@ -123,18 +151,29 @@ class TestLocustLifecycle(unittest.TestCase):
                     }
 
                 progress = []
+
+                def stop():
+                    self.assertTrue(
+                        (metadata.result_dir / "locust_stats.csv").is_file()
+                    )
+                    self.assertTrue(
+                        (metadata.result_dir / "locust_stats_history.csv").is_file()
+                    )
+                    events.append("stop")
+
                 result = run(
                     metadata,
                     start,
-                    lambda: events.append("stop"),
+                    stop,
                     monitor_cpu=False,
                     on_progress=progress.append,
                     progress_interval_seconds=0.05,
                 )
                 self.assertEqual(result.completed_requests, 2)
                 self.assertEqual(result.failures, 0)
+                self.assertIsNotNone(result.load_start_utc)
                 self.assertEqual(events, ["start", "request", "request", "stop"])
-                self.assertIn("Locust: preparing service and requests...", progress)
+                self.assertIn("Preparing service and requests...", progress)
                 self.assertTrue(
                     any("Locust: 2/2 requests" in line for line in progress)
                 )
@@ -164,7 +203,7 @@ class TestLocustLifecycle(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
-    def test_stop_hook_runs_when_start_hook_fails(self):
+    def test_teardown_runs_when_setup_fails(self):
         events = []
         with tempfile.TemporaryDirectory() as tmp:
             metadata = RunMetadata(
@@ -183,7 +222,6 @@ class TestLocustLifecycle(unittest.TestCase):
                 ),
                 "http_get",
                 lambda *args: {},
-                True,
                 Path(tmp) / "result",
             )
 
@@ -191,10 +229,47 @@ class TestLocustLifecycle(unittest.TestCase):
                 events.append("start")
                 raise ValueError("setup failed")
 
-            with self.assertRaisesRegex(ValueError, "setup failed"):
+            with (
+                patch(
+                    "pulp_juicer.locust_driver.Environment.create_local_runner"
+                ) as create,
+                self.assertRaisesRegex(ValueError, "setup failed"),
+            ):
                 run(metadata, start, lambda: events.append("stop"), monitor_cpu=False)
+            create.assert_not_called()
             self.assertEqual(events, ["start", "stop"])
             self.assertFalse(metadata.result_dir.exists())
+
+    def test_failed_run_keeps_only_compose_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "result"
+            metadata = RunMetadata(
+                "smoke",
+                "small",
+                SimpleNamespace(id=1, name="normal"),
+                "run001",
+                {},
+                (),
+                LoadConfig(users=1, spawn_rate_per_second=1, max_duration="2s"),
+                "http_get",
+                lambda *args: {},
+                output,
+            )
+
+            def start():
+                (output / "partial.csv").write_text("incomplete")
+                raise ValueError("setup failed")
+
+            def stop():
+                (output / "compose.log").write_text("pulp | startup error\n")
+
+            with self.assertRaisesRegex(ValueError, "setup failed"):
+                run(metadata, start, stop, monitor_cpu=False)
+
+            self.assertEqual([path.name for path in output.iterdir()], ["compose.log"])
+            self.assertEqual(
+                (output / "compose.log").read_text(), "pulp | startup error\n"
+            )
 
 
 if __name__ == "__main__":

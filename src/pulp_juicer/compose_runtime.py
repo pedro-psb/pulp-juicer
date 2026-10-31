@@ -5,6 +5,7 @@ import re
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TextIO
 from urllib.parse import urlsplit
 
 from .client import PulpClient
@@ -29,6 +30,7 @@ class ComposeRuntime:
         *args: str,
         check: bool = True,
         capture: bool = False,
+        output: TextIO | None = None,
     ):
         command = [*self.plan.compose_command, "--project-name", self.project]
         for file in files:
@@ -43,10 +45,16 @@ class ComposeRuntime:
             check=check,
             text=True,
             capture_output=capture,
+            stdout=output,
+            stderr=subprocess.STDOUT if output is not None else None,
         )
 
     def destroy_before_start(self, *, reset: bool = False):
-        """Remove any leftover project containers before Locust fires test_start."""
+        """Remove any leftover project containers before preparing a run."""
+        self.files = ()
+        self.environment = {}
+        self.sources = {}
+        self.started = False
         environment = {
             "PULPCORE_REPO": str(self.plan.repository_root),
             "PULP_PORT": str(urlsplit(self.plan.pulp_connection.base_url).port or 5001),
@@ -58,7 +66,6 @@ class ComposeRuntime:
             else ("down", "--remove-orphans")
         )
         self.command((self.plan.compose_file,), environment, *args)
-        self.started = False
 
     def ensure(
         self,
@@ -108,3 +115,26 @@ class ComposeRuntime:
         if self.started:
             self.command(self.files, self.environment, "down", "--remove-orphans")
             self.started = False
+
+    def dump_logs(self, path: Path) -> Path:
+        """Save logs from every service before Compose removes the containers."""
+        with path.open("w") as log:
+            if not self.files:
+                log.write("Compose services were not started for this run.\n")
+                return path
+            try:
+                result = self.command(
+                    self.files,
+                    self.environment,
+                    "logs",
+                    "--no-color",
+                    "--timestamps",
+                    check=False,
+                    output=log,
+                )
+            except OSError as exc:
+                log.write(f"Could not collect Compose logs: {exc}\n")
+            else:
+                if result.returncode:
+                    log.write(f"Compose logs exited with status {result.returncode}.\n")
+        return path

@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -15,10 +16,13 @@ from rich.text import Text
 
 from .catalog import experiments
 from .execution import execute_test_plan
-from .plan import build_test_plan, resolve_workdir
-from .plan_file import load_plan_file, write_plan_file
+from .execution_ids import latest_execution_id, next_execution_id
+from .execution_log import ExecutionLog
+from .plan import build_test_plan, execution_scope, resolve_workdir
+from .plan_file import write_plan_file
 from .report import render_report
 from .sources import public_source
+from .trial_report import render_trial_report
 from .types import PulpConnection
 
 
@@ -94,7 +98,7 @@ def show_experiment(experiment_id):
     )
     _print_styled(("Scenarios:", "bold magenta"))
     for scenario in experiment.scenarios:
-        count = sum(isinstance(value, int) for value in scenario.runs)
+        count = len(scenario.run_order)
         _print_styled(
             "  ",
             (scenario.id, "green"),
@@ -129,15 +133,39 @@ def show_experiment(experiment_id):
     "--quarto", "quarto_command", envvar="QUARTO", default="quarto", show_default=True
 )
 def report_results(results_dir, quarto_command):
-    """Render the completed runs as a Quarto HTML report."""
+    """Render detailed and trial comparison reports per execution."""
+    new_reports = []
+    existing_reports = []
     try:
-        report = render_report(results_dir, quarto_command)
+        if results_dir.is_dir():
+            for execution_dir in sorted(results_dir.iterdir()):
+                if not execution_dir.is_dir() or not re.fullmatch(
+                    r".+__\d{3,}", execution_dir.name
+                ):
+                    continue
+                for name, renderer in (
+                    ("report.html", render_report),
+                    ("trials.html", render_trial_report),
+                ):
+                    existing = (execution_dir / name).is_file()
+                    report = renderer(execution_dir, quarto_command)
+                    if report is not None:
+                        (existing_reports if existing else new_reports).append(report)
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
         raise click.ClickException(str(exc)) from exc
-    if report is None:
+    if not new_reports and not existing_reports:
         click.echo(f"No completed runs found under {results_dir}")
-    else:
-        click.echo(f"Report: {report}")
+        return
+    for title, reports in (
+        ("New Reports", new_reports),
+        ("Existing", existing_reports),
+    ):
+        if reports:
+            if title == "Existing" and new_reports:
+                click.echo()
+            click.echo(f"{title}:")
+            for report in reports:
+                click.echo(report)
 
 
 @cli.command("results")
@@ -156,7 +184,7 @@ def list_results(experiment_id, workdir):
     _, compose_file = registry[experiment_id]
     results_dir = resolve_workdir(compose_file, workdir) / "results"
     found = False
-    for metadata_file in sorted(results_dir.glob("*/*/*/run_metadata.json")):
+    for metadata_file in sorted(results_dir.glob("*/*/*/*/run_metadata.json")):
         try:
             metadata = json.loads(metadata_file.read_text())
         except (OSError, ValueError) as exc:
@@ -170,12 +198,20 @@ def list_results(experiment_id, workdir):
         ):
             _print_styled((metadata_file.parent, "cyan"))
             found = True
-    if found:
-        for name in ("report.html", "report.qmd"):
-            report_file = results_dir / name
-            if report_file.is_file():
-                _print_styled((report_file, "magenta"))
-    else:
+    if results_dir.is_dir():
+        for execution_dir in sorted(results_dir.iterdir()):
+            if (
+                not execution_dir.is_dir()
+                or not execution_dir.name.startswith(f"{experiment_id}__")
+                or not re.fullmatch(r".+__\d{3,}", execution_dir.name)
+            ):
+                continue
+            for name in ("report.html", "report.qmd", "trials.html", "trials.qmd"):
+                report_file = execution_dir / name
+                if report_file.is_file():
+                    _print_styled((report_file, "magenta"))
+                    found = True
+    if not found:
         click.echo(f"No results found for {experiment_id} under {results_dir}")
 
 
@@ -373,7 +409,7 @@ def clean(targets, workdir, docker_command):
                 click.echo(f"{'Removed' if removed else 'No'} {target} at {path}")
 
 
-@cli.command("run")
+@cli.command("squeeze")
 @click.argument("experiment_id", required=False)
 @click.option(
     "--workdir",
@@ -387,16 +423,13 @@ def clean(targets, workdir, docker_command):
 @click.option("--scenario", "scenario_id", help="Run one scenario from the plan.")
 @click.option("--run-id", help="Run one unit within the selected scenario.")
 @click.option(
-    "-f",
-    "--force",
-    is_flag=True,
-    help="Rerun selected units even if results already exist.",
+    "-f", "--force", is_flag=True, help="Replace the latest execution for this scope."
 )
 @click.option(
-    "--refresh-plan", is_flag=True, help="Rebuild the stored plan from the experiment."
+    "--save-plan", is_flag=True, help="Save the generated execution plan as JSON."
 )
-def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refresh_plan):
-    """List available runs, or execute a selected experiment scope."""
+def squeeze(experiment_id, workdir, run_all, scenario_id, run_id, force, save_plan):
+    """List available runs, or execute an experiment, scenario, or run."""
     if experiment_id is None:
         _list_experiments()
         raise click.UsageError("Missing argument 'EXPERIMENT_ID'.")
@@ -407,46 +440,82 @@ def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refres
         raise click.ClickException(
             "--all cannot be combined with --scenario or --run-id"
         )
+    if run_id is not None and scenario_id is None:
+        raise click.UsageError("--run-id requires --scenario")
     experiment, compose_file = registry[experiment_id]
-    plan_file = resolve_workdir(compose_file, workdir) / f"plan-{experiment_id}.json"
+    if not run_all and scenario_id is None:
+        _print_styled(
+            ("Available runs for ", "bold magenta"),
+            (experiment_id, "bold cyan"),
+            (":", "bold magenta"),
+        )
+        _list_runs(build_test_plan(experiment, compose_file).runs)
+        click.echo(
+            "Use --all, --scenario SCENARIO, or --scenario SCENARIO --run-id RUN_ID to squeeze."
+        )
+        return
+    scope = execution_scope(experiment_id, scenario_id, run_id)
+    root = resolve_workdir(compose_file, workdir)
+    execution_log = None
+    plan = None
     try:
-        if refresh_plan or not plan_file.is_file():
-            command = tuple(shlex.split(os.environ.get("COMPOSE", "docker compose")))
-            if not command:
-                raise ValueError("Compose command must not be empty")
-            prepared = build_test_plan(
-                experiment,
-                compose_file,
-                workdir=workdir,
-                pulp_connection=PulpConnection(
-                    password=os.environ.get("PULP_PASSWORD", "password")
-                ),
-                compose_command=command,
-            )
-            write_plan_file(prepared)
-            click.echo(f"Prepared {len(prepared.runs)} runs: {plan_file}")
-        plan = load_plan_file(plan_file, scenario_id=scenario_id, run_id=run_id)
-        if not run_all and scenario_id is None:
-            _print_styled(
-                ("Available runs for ", "bold magenta"),
-                (experiment_id, "bold cyan"),
-                (":", "bold magenta"),
-            )
-            _list_runs(plan.runs)
-            click.echo(
-                "Use --all, --scenario SCENARIO, or --scenario SCENARIO --run-id RUN_ID to run."
-            )
-            return
-        click.echo(f"Selected {len(plan.runs)} measurement(s) from {plan_file}")
+        selected_id = (
+            latest_execution_id(root, scope) if force else None
+        ) or next_execution_id(root, scope)
+        execution_log = ExecutionLog(selected_id)
+        execution_log.logger.info("Plan preparation started")
+        plan_file = root / f"plan-{selected_id}.json"
+        command = tuple(shlex.split(os.environ.get("COMPOSE", "docker compose")))
+        if not command:
+            raise ValueError("Compose command must not be empty")
+        plan = build_test_plan(
+            experiment,
+            compose_file,
+            workdir=workdir,
+            execution_id=selected_id,
+            scenario_id=scenario_id,
+            pulp_connection=PulpConnection(
+                password=os.environ.get("PULP_PASSWORD", "password")
+            ),
+            compose_command=command,
+        )
+        if run_id is not None:
+            selected_runs = tuple(run for run in plan.runs if run.run_id == run_id)
+            if not selected_runs:
+                raise ValueError(f"Unknown run ID in {scenario_id}: {run_id}")
+            plan = replace(plan, runs=selected_runs)
+        execution_log.logger.info("Plan preparation finished: %d runs", len(plan.runs))
+        if force and plan.results_dir.exists():
+            shutil.rmtree(plan.results_dir)
+        plan.results_dir.mkdir(parents=True, exist_ok=True)
+        log_path = plan.results_dir / "execution.log"
+        execution_log.save_to(log_path)
+        if save_plan:
+            write_plan_file(plan)
+        elif force:
+            plan_file.unlink(missing_ok=True)
+        click.echo(f"Execution: {selected_id}")
+        click.echo(f"Log: {log_path}")
+        if save_plan:
+            click.echo(f"Plan: {plan_file}")
+        click.echo(f"Selected {len(plan.runs)} measurement(s)")
+
+        def progress(message):
+            execution_log.logger.info(message)
+            click.echo(message)
+
         results = execute_test_plan(
             plan,
-            force=force,
-            on_progress=click.echo,
-            on_skip=lambda run: click.echo(
-                f"Skipping {run.scenario_id}/{run.run_id} {run.candidate.name}: "
-                f"results already exist at {run.result_dir}"
-            ),
+            on_progress=progress,
         )
+        incomplete = any(
+            result.timed_out or result.completed_requests < result.expected_requests
+            for result in results
+        )
+        if incomplete:
+            execution_log.logger.warning("Execution finished with incomplete runs")
+        else:
+            execution_log.logger.info("Execution finished: %d runs", len(plan.runs))
     except (
         ValueError,
         OSError,
@@ -455,26 +524,33 @@ def run_plan(experiment_id, workdir, run_all, scenario_id, run_id, force, refres
         KeyError,
         subprocess.CalledProcessError,
     ) as exc:
+        if execution_log is not None:
+            execution_log.logger.exception("Execution failed")
+        if plan is not None:
+            for run in plan.runs:
+                compose_log = run.result_dir / "compose.log"
+                if compose_log.is_file():
+                    click.echo(f"Compose log: {compose_log}", err=True)
         raise click.ClickException(str(exc)) from exc
+    finally:
+        if execution_log is not None:
+            execution_log.close()
     for result in results:
         click.echo(
             f"{result.scenario_id}/{result.run_id} {result.candidate_name}: "
             f"{result.completed_requests}/{result.expected_requests} requests, "
             f"{result.failures} failures, p95={result.p95_response_ms:.1f} ms"
         )
-        if result.result_dir.exists():
-            click.echo(f"Results: {result.result_dir}")
-        else:
-            click.echo("Results removed after unsuccessful run")
-    if any(
-        result.timed_out
-        or result.failures
-        or result.completed_requests < result.expected_requests
-        for result in results
-    ):
-        raise click.ClickException(
-            "One or more runs were incomplete or had request failures"
-        )
+        incomplete_run = not (result.result_dir / "run_metadata.json").is_file()
+        if incomplete_run:
+            click.echo("Incomplete measurements removed after unsuccessful run")
+        compose_log = result.result_dir / "compose.log"
+        if (incomplete_run or result.failures) and compose_log.is_file():
+            click.echo(f"Compose log: {compose_log}")
+    if plan.results_dir.exists():
+        click.echo(f"\nResults: {plan.results_dir}")
+    if incomplete:
+        raise click.ClickException("One or more runs were incomplete")
 
 
 if __name__ == "__main__":

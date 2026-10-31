@@ -1,4 +1,4 @@
-"""Store one experiment plan with ordered scenario and unit runs."""
+"""Optionally serialize an execution plan for inspection or later loading."""
 
 import json
 import os
@@ -15,7 +15,7 @@ from .types import (
     VolumeFixtureMetadata,
 )
 
-VERSION = 3
+VERSION = 6
 
 
 def _unit(run: RunMetadata) -> dict:
@@ -32,32 +32,37 @@ def _unit(run: RunMetadata) -> dict:
         ],
         "load": asdict(run.load),
         "driver": run.driver,
-        "restart_before": run.restart_before,
         "result_dir": str(run.result_dir),
     }
 
 
 def write_plan_file(plan: TestPlanMetadata) -> Path:
-    """Write a single plan at <workdir>/plan-<experiment>.json."""
-    path = plan.workdir / f"plan-{plan.experiment.id}.json"
+    """Write the selected execution's plan under its stable ID."""
+    path = plan.workdir / f"plan-{plan.execution_id}.json"
     scenarios = [
         {
             "scenario": scenario.id,
             "runs": [_unit(run) for run in plan.runs if run.scenario_id == scenario.id],
         }
         for scenario in plan.experiment.scenarios
+        if any(run.scenario_id == scenario.id for run in plan.runs)
     ]
     data = {
         "version": VERSION,
         "kind": "plan",
         "experiment": plan.experiment.id,
+        "execution_id": plan.execution_id,
         "required_sources": list(plan.experiment.required_sources),
         "runtime": {
             "repository_root": str(plan.repository_root),
             "workdir": str(plan.workdir),
             "compose_file": str(plan.compose_file),
             "results_dir": str(plan.results_dir),
-            "pulp_connection": asdict(plan.pulp_connection),
+            "pulp_connection": {
+                key: value
+                for key, value in asdict(plan.pulp_connection).items()
+                if key != "password"
+            },
             "compose_command": list(plan.compose_command),
             "ready_timeout_seconds": plan.ready_timeout_seconds,
         },
@@ -118,7 +123,6 @@ def _hydrate_run(
         load=LoadConfig(**unit["load"]),
         driver=unit["driver"],
         input_builder=input_builder,
-        restart_before=unit["restart_before"],
         result_dir=Path(unit["result_dir"]),
     )
 
@@ -131,7 +135,7 @@ def load_plan_file(
         raise ValueError("A run ID requires a scenario")
     data = json.loads(Path(path).read_text())
     if data.get("version") != VERSION or data.get("kind") != "plan":
-        raise ValueError(f"Unsupported plan file: {path}. Run with --refresh-plan")
+        raise ValueError(f"Unsupported plan file: {path}. Run squeeze -f to replace it")
     experiment_id = data["experiment"]
     registry = experiments()
     if experiment_id not in registry:
@@ -181,8 +185,12 @@ def load_plan_file(
         workdir=Path(runtime["workdir"]),
         compose_file=Path(runtime["compose_file"]),
         results_dir=Path(runtime["results_dir"]),
-        pulp_connection=PulpConnection(**runtime["pulp_connection"]),
+        pulp_connection=PulpConnection(
+            **runtime["pulp_connection"],
+            password=os.environ.get("PULP_PASSWORD", "password"),
+        ),
         compose_command=tuple(runtime["compose_command"]),
         ready_timeout_seconds=runtime["ready_timeout_seconds"],
         runs=tuple(selected),
+        execution_id=data["execution_id"],
     )

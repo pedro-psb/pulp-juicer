@@ -3,8 +3,7 @@
 `experiment.py` defines fixture instances, candidates, scenarios, and run order.
 Candidate IDs are positive integers.
 Each scenario uses its own `request_count`, which may be less than the fixture capacity.
-The burst scenario runs normal and staging twice; the moderate scenario runs each candidate twice.
-`"r"` removes Pulp volumes before the next run. The generated fixture data remains on disk.
+The burst scenario runs normal and staging twice. Pulp volumes are reset before every run; generated fixture data remains on disk.
 
 ## Candidate sources
 
@@ -42,18 +41,18 @@ The experiment modules do not import Locust.
 
 ## Test plan and CLI
 
-`build_test_plan` expands this experiment into ordered `RunMetadata` records. Each record identifies a scenario, candidate, and run ID; carries fixture metadata and load settings; and marks whether Pulp must restart before the run. Planning does not build fixtures or start services.
-`run` creates one JSON plan with ordered scenario and unit runs on first use, then selects a scope from it. Locust's `test_start` builds fixtures, starts Pulp, and invokes candidate setup, while `test_stop` destroys the services. The driver returns `RunResultMetadata` with request counts, failures, latency, and artifact paths.
-Runs and Locust artifacts go under `_juice/results/{scenario}/{candidate}/{run}`; generated fixtures go under `_juice/fixture/`.
+`build_test_plan` expands this experiment's `run_order` into ordered `RunMetadata` records. Each record identifies a scenario, candidate, and run ID and carries fixture metadata and load settings. Planning does not build fixtures or start services.
+`squeeze` selects an execution: the whole experiment, one scenario, or one run. It builds the selected plan in memory; `--save-plan` also writes JSON. The Python wrapper builds fixtures, starts Pulp, and invokes candidate setup before Locust begins recording; it destroys the services after Locust finishes and closes its measurements. The driver returns `RunResultMetadata` with request counts, failures, latency, and artifact paths.
+Runs and Locust artifacts go under `_juice/results/{execution_id}/{scenario}/{candidate}/{run}`; generated fixtures go under `_juice/fixture/`.
 
 ```bash
 uv run --locked pulp-juicer ls
 uv run --locked pulp-juicer show maven-pull-through
-uv run --locked pulp-juicer run maven-pull-through
-uv run --locked pulp-juicer run maven-pull-through --scenario burst --run-id run001
+uv run --locked pulp-juicer squeeze maven-pull-through
+uv run --locked pulp-juicer squeeze maven-pull-through --scenario burst --run-id run001
 uv run --locked --group report pulp-juicer report
 ```
 
-Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. Use `--refresh-plan` after changing candidate sources in `experiment.py`.
-Add `-f` to rerun selected units whose result directories already exist.
+Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. A bare experiment name lists the available runs.
+Each squeeze gets a new numbered execution ID. Add `-f` to replace the latest execution for the selected scope.
 

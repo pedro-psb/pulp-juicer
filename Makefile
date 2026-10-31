@@ -12,14 +12,14 @@ setup: ## Install the editable package and report dependencies.
 	$(UV) pip install -e . --group report
 
 format: ## Format Python files with Ruff.
-	$(UV) run --no-sync --with ruff ruff format .
-	$(UV) run --no-sync --with ruff ruff check --fix .
+	$(UV) run --no-sync --with ruff ruff format src tests
+	$(UV) run --no-sync --with ruff ruff check --fix src tests
 
 lint: ## Lint Python files with Ruff.
-	$(UV) run --no-sync --with ruff ruff check .
+	$(UV) run --no-sync --with ruff ruff check src tests
 
 test: ## Run the test suite.
-	$(UV) run --no-sync --with pytest pytest -p no:anyio
+	$(UV) run --no-sync --with pytest pytest -p no:anyio tests
 
 ls: ## List experiments and scenarios.
 	$(UV) run --no-sync pulp-juicer ls

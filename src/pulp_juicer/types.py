@@ -104,7 +104,7 @@ class ScenarioConfig:
     description: str
     driver: str
     input: Callable[..., dict]
-    runs: tuple[int | str, ...]
+    run_order: tuple[int, ...]
     load: LoadConfig
     requires: tuple[RequireFixture, ...] = ()
 

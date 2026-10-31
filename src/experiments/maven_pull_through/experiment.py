@@ -47,18 +47,18 @@ EXPERIMENT = ExperimentConfig(
     ),
     scenarios=(
         ScenarioConfig(
-            id="burst",
-            description="Thirty concurrent users request 650 unique Maven artifacts.",
+            id="calibrate",
+            description="Analyse system response to a big impulse load",
             driver="http_get",
             requires=(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            runs=(1, 1, "r", 2, 2),
+            run_order=(1, 2),
             load=LoadConfig(
-                users=30,
-                request_count=650,
-                spawn_rate_per_second=30,
+                users=1000,
+                request_count=1000,
+                spawn_rate_per_second=1000,
                 max_duration="5m",
                 wait_seconds=0,
                 idle_before_seconds=5,
@@ -67,18 +67,18 @@ EXPERIMENT = ExperimentConfig(
             ),
         ),
         ScenarioConfig(
-            id="moderate",
-            description="Ten concurrent users request 200 unique Maven artifacts.",
+            id="burst",
+            description="Thirty concurrent users request 650 unique Maven artifacts.",
             driver="http_get",
             requires=(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            runs=(1, 2, "r", 2, 1),
+            run_order=(1, 1, 2, 2),
             load=LoadConfig(
-                users=10,
-                request_count=200,
-                spawn_rate_per_second=10,
+                users=30,
+                request_count=650,
+                spawn_rate_per_second=30,
                 max_duration="5m",
                 wait_seconds=0,
                 idle_before_seconds=5,
@@ -94,7 +94,7 @@ EXPERIMENT = ExperimentConfig(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            runs=(1,),
+            run_order=(1,),
             load=LoadConfig(
                 users=10,
                 request_count=120,

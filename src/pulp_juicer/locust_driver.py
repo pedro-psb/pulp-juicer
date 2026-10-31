@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import gevent
-from gevent.event import Event
 from locust import HttpUser, constant, task
 from locust.env import Environment
 from locust.event import Events
@@ -21,6 +20,21 @@ from locust.util.timespan import parse_timespan
 
 from .db_cpu_monitor import DBCpuMonitor
 from .plan import RunMetadata, RunResultMetadata
+
+
+def clean_incomplete_results(output: Path) -> None:
+    """Remove partial measurements but retain a captured Compose log."""
+    log = output / "compose.log"
+    if not log.is_file():
+        shutil.rmtree(output)
+        return
+    for path in output.iterdir():
+        if path == log:
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
 
 
 def run(
@@ -35,7 +49,7 @@ def run(
     compose_file: Path | None = None,
     monitor_cpu: bool = True,
 ) -> RunResultMetadata:
-    """Execute one run and retain its artifacts only after full success."""
+    """Execute one run and retain artifacts after all requests complete."""
     if metadata.driver != "http_get":
         raise NotImplementedError(f"Unsupported driver: {metadata.driver}")
 
@@ -43,32 +57,40 @@ def run(
     output.mkdir(parents=True, exist_ok=False)
     successful = False
     try:
-        result = _run_created(
-            metadata,
-            on_start,
-            on_stop,
-            compose_command=compose_command,
-            project=project,
-            compose_file=compose_file,
-            monitor_cpu=monitor_cpu,
-            on_progress=on_progress,
-            progress_interval_seconds=progress_interval_seconds,
-        )
+        if on_progress:
+            on_progress("Preparing service and requests...")
+        try:
+            request_input = on_start()
+            result = _run_created(
+                metadata,
+                request_input,
+                compose_command=compose_command,
+                project=project,
+                compose_file=compose_file,
+                monitor_cpu=monitor_cpu,
+                on_progress=on_progress,
+                progress_interval_seconds=progress_interval_seconds,
+            )
+        except BaseException as exc:
+            try:
+                on_stop()
+            except Exception as cleanup_error:  # noqa: BLE001 - preserve the original failure
+                exc.add_note(f"Service teardown also failed: {cleanup_error}")
+            raise
+        on_stop()
         successful = (
             not result.timed_out
-            and result.failures == 0
             and result.completed_requests >= result.expected_requests
         )
         return result
     finally:
         if not successful:
-            shutil.rmtree(output)
+            clean_incomplete_results(output)
 
 
 def _run_created(
     metadata: RunMetadata,
-    on_start: Callable[[], dict],
-    on_stop: Callable[[], None],
+    request_input: dict,
     *,
     compose_command: tuple[str, ...],
     project: str,
@@ -79,17 +101,24 @@ def _run_created(
 ) -> RunResultMetadata:
     """Run Locust inside an output directory owned by this measurement."""
     output = metadata.result_dir
+    base_url = request_input["base_url"].rstrip("/")
+    requests = tuple(request_input["requests"])
+    if not base_url or not requests:
+        raise ValueError("http_get input needs a base_url and at least one request")
+    wait_seconds = float(request_input.get("wait_seconds", metadata.load.wait_seconds))
     state = {
-        "base_url": "",
-        "requests": (),
-        "started": False,
-        "start_error": None,
-        "stop_error": None,
+        "base_url": base_url,
+        "requests": requests,
+        "request_timeout": float(
+            request_input.get(
+                "request_timeout_seconds", metadata.load.request_timeout_seconds
+            )
+        ),
     }
-    stop_done = Event()
     indices = itertools.count()
     completed = 0
     timed_out = False
+    load_start_utc = None
     timeout = parse_timespan(metadata.load.max_duration)
     deadline = None
     cpu = None
@@ -112,7 +141,7 @@ def _run_created(
 
     class RequestUser(HttpUser):
         host = "http://localhost"
-        wait_time = constant(metadata.load.wait_seconds)
+        wait_time = constant(wait_seconds)
 
         @task
         def fetch(self):
@@ -140,110 +169,52 @@ def _run_created(
                 ):
                     response.failure(f"SHA256 mismatch: {path}")
 
-    events = Events()
-    environment = Environment(user_classes=[RequestUser], events=events)
-    runner = environment.create_local_runner()
-
     def stop_at_deadline():
         nonlocal timed_out
         timed_out = True
+        if on_progress:
+            on_progress("Load test timed out")
         runner.quit()
 
-    def start_test(environment, **kwargs):
-        nonlocal deadline, cpu
-        try:
-            if on_progress:
-                on_progress("Locust: preparing service and requests...")
-            request_input = on_start()
-            base_url = request_input["base_url"].rstrip("/")
-            requests = tuple(request_input["requests"])
-            if not base_url or not requests:
-                raise ValueError(
-                    "http_get input needs a base_url and at least one request"
-                )
-            state.update(
-                {
-                    "base_url": base_url,
-                    "requests": requests,
-                    "request_timeout": float(
-                        request_input.get(
-                            "request_timeout_seconds",
-                            metadata.load.request_timeout_seconds,
-                        )
-                    ),
-                }
+    with (output / "data_load.csv").open("w", newline="") as data_file:
+        data_writer = csv.writer(data_file)
+        data_writer.writerow(
+            (
+                "path",
+                "url",
+                "name",
+                "expected_status",
+                "sha256",
+                "wait_seconds",
+                "request_timeout_seconds",
             )
-            wait_seconds = float(
-                request_input.get("wait_seconds", metadata.load.wait_seconds)
+        )
+        for item in requests:
+            data_writer.writerow(
+                (
+                    item["path"],
+                    f"{base_url}/{item['path']}",
+                    item.get("name", "http_get"),
+                    item.get("expected_status", 200),
+                    item.get("sha256", ""),
+                    wait_seconds,
+                    state["request_timeout"],
+                )
             )
-            RequestUser.wait_time = constant(wait_seconds)
-            with (output / "data_load.csv").open("w", newline="") as data_file:
-                data_writer = csv.writer(data_file)
-                data_writer.writerow(
-                    (
-                        "path",
-                        "url",
-                        "name",
-                        "expected_status",
-                        "sha256",
-                        "wait_seconds",
-                        "request_timeout_seconds",
-                    )
-                )
-                for item in requests:
-                    data_writer.writerow(
-                        (
-                            item["path"],
-                            f"{base_url}/{item['path']}",
-                            item.get("name", "http_get"),
-                            item.get("expected_status", 200),
-                            item.get("sha256", ""),
-                            wait_seconds,
-                            state["request_timeout"],
-                        )
-                    )
-            cpu = (
-                DBCpuMonitor(
-                    output / "db_cpu.csv",
-                    shlex.join(compose_command),
-                    project,
-                    str(compose_file) if compose_file else "compose.yaml",
-                )
-                if monitor_cpu
-                else None
-            )
-            if cpu:
-                cpu.start()
-            deadline = gevent.spawn_later(timeout, stop_at_deadline)
-            state["started"] = True
-            if on_progress:
-                on_progress(
-                    f"Locust: starting {metadata.load.users} users for {len(requests)} requests"
-                )
-            if metadata.load.idle_before_seconds:
-                gevent.sleep(metadata.load.idle_before_seconds)
-        except Exception as exc:  # noqa: BLE001 - propagate hook errors after Locust stops
-            state["start_error"] = exc
 
-    def stop_test(environment, **kwargs):
-        try:
-            if deadline:
-                deadline.kill()
-            if state["started"] and metadata.load.tail_after_seconds:
-                gevent.sleep(metadata.load.tail_after_seconds)
-            if cpu:
-                cpu.stop()
-        except Exception as exc:  # noqa: BLE001 - propagate hook errors after Locust stops
-            state["stop_error"] = exc
-        finally:
-            try:
-                on_stop()
-            except Exception as exc:  # noqa: BLE001 - preserve teardown errors
-                state["stop_error"] = exc
-            stop_done.set()
-
-    events.test_start.add_listener(start_test)
-    events.test_stop.add_listener(stop_test)
+    events = Events()
+    environment = Environment(user_classes=[RequestUser], events=events)
+    runner = environment.create_local_runner()
+    cpu = (
+        DBCpuMonitor(
+            output / "db_cpu.csv",
+            shlex.join(compose_command),
+            project,
+            str(compose_file) if compose_file else "compose.yaml",
+        )
+        if monitor_cpu
+        else None
+    )
 
     def count_request(request_type, **kwargs):
         nonlocal completed
@@ -303,33 +274,55 @@ def _run_created(
         csv_writer = StatsCSVFileWriter(
             environment, PERCENTILES_TO_REPORT, str(output / "locust")
         )
-        csv_greenlet = gevent.spawn(csv_writer.stats_writer)
+        csv_greenlet = None
         try:
+            if cpu:
+                cpu.start()
+            csv_greenlet = gevent.spawn(csv_writer.stats_writer)
+            if on_progress:
+                on_progress(
+                    f"Locust: starting {metadata.load.users} users for {len(requests)} requests"
+                )
+            if metadata.load.idle_before_seconds:
+                gevent.sleep(metadata.load.idle_before_seconds)
+            deadline = gevent.spawn_later(timeout, stop_at_deadline)
+            if on_progress:
+                on_progress("Load test starting")
+            load_start_utc = datetime.now(UTC).isoformat(timespec="microseconds")
             runner.start(metadata.load.users, metadata.load.spawn_rate_per_second)
-            while not state["started"] and state["start_error"] is None:
-                if runner.spawning_greenlet.ready():
-                    raise RuntimeError("Locust stopped before the start hook completed")
-                gevent.sleep(0.05)
-            if state["start_error"] is not None:
-                raise state["start_error"]
+            if on_progress:
+                on_progress("Load test started")
             if on_progress:
                 report_stats()
                 progress_greenlet = gevent.spawn(report_periodically)
             runner.greenlet.join()
-            stop_done.wait()
+            if on_progress:
+                on_progress("Load test stopped")
+            deadline.kill()
+            deadline = None
             report_stats()
-            if state["stop_error"] is not None:
-                raise state["stop_error"]
+            if metadata.load.tail_after_seconds:
+                gevent.sleep(metadata.load.tail_after_seconds)
         finally:
+            if deadline is not None:
+                deadline.kill()
             if progress_greenlet is not None:
                 progress_greenlet.kill(block=True)
-            runner.quit()
-            stop_done.wait()
-            csv_greenlet.kill(block=True)
-            csv_writer._stats_history_data_rows(
-                csv_writer.stats_history_csv_writer, time.time()
-            )
-            csv_writer.close_files()
+            try:
+                runner.quit()
+            finally:
+                try:
+                    if csv_greenlet is not None:
+                        csv_greenlet.kill(block=True)
+                    csv_writer._stats_history_data_rows(
+                        csv_writer.stats_history_csv_writer, time.time()
+                    )
+                finally:
+                    try:
+                        csv_writer.close_files()
+                    finally:
+                        if cpu:
+                            cpu.stop()
 
     stats = StatsCSV(environment, PERCENTILES_TO_REPORT)
     for name, method in (
@@ -354,5 +347,6 @@ def _run_created(
         mean_response_ms=total.avg_response_time,
         p95_response_ms=total.get_response_time_percentile(0.95),
         timed_out=timed_out,
+        load_start_utc=load_start_utc,
     )
     return result

@@ -388,6 +388,9 @@ def prepare_run(run_dir, results_dir):
     lines += ["### Source files", ""]
     for name, label in (
         ("run_metadata.json", "Run configuration, setup, sources, and result"),
+        ("pulp_status.json", "Pulp status after the load test"),
+        ("pulp_status_error.txt", "Pulp status capture error"),
+        ("compose.log", "Compose service logs"),
         ("data_load.csv", "Requests selected for this run"),
         ("locust_stats.csv", "Locust summary CSV"),
         ("locust_stats_history.csv", "Locust history CSV"),
@@ -404,26 +407,29 @@ def prepare_run(run_dir, results_dir):
     return stats, lines
 
 
-def completed_runs(results):
-    if not results.is_dir():
+def completed_runs(execution_dir):
+    if not execution_dir.is_dir():
         return
-    stats_files = results.glob("*/*/*/locust_stats.csv")
+    stats_files = execution_dir.glob("*/*/*/locust_stats.csv")
     for run_dir in sorted(stats_files):
         run_dir = run_dir.parent
-        relative = run_dir.relative_to(results)
+        relative = run_dir.relative_to(execution_dir)
         if any(part.startswith("_") for part in relative.parts):
             continue
         yield run_dir
 
 
 def render_report(
-    results_dir: Path = Path("_juice/results"),
+    execution_dir: Path,
     quarto_command: str = "quarto",
-    title: str = "Pulp Juicer load test",
+    title: str | None = None,
 ) -> Path | None:
-    """Render completed runs and return the HTML path, or None when there are no runs."""
-    results_dir = Path(results_dir)
-    runs = list(completed_runs(results_dir))
+    """Render one execution, reusing its existing HTML report when present."""
+    execution_dir = Path(execution_dir)
+    report = execution_dir / "report.html"
+    if report.is_file():
+        return report.resolve()
+    runs = list(completed_runs(execution_dir))
     if not runs:
         return None
     quarto = shutil.which(quarto_command)
@@ -436,7 +442,7 @@ def render_report(
     runs.sort(key=lambda run_dir: (run_dir.name, run_dir.parent.name))
     lines = [
         "---",
-        f"title: {json.dumps(title)}",
+        f"title: {json.dumps(title or f'Pulp Juicer load test: {execution_dir.name}')}",
         "format:",
         "  html:",
         "    toc: true",
@@ -445,28 +451,25 @@ def render_report(
         "",
         "# Overview",
         "",
-        "| Scenario | Run | Candidate | Requests | Failures | Mean response (ms) | p95 (ms) |",
-        "|:--|:--|:--|--:|--:|--:|--:|",
+        "| Execution | Scenario | Run | Candidate | Requests | Failures | Mean response (ms) | p95 (ms) |",
+        "|:--|:--|:--|:--|--:|--:|--:|--:|",
     ]
     sections = []
     for run_dir in runs:
-        stats, body = prepare_run(run_dir, results_dir)
-        scenario = (
-            run_dir.parent.parent.name
-            if len(run_dir.relative_to(results_dir).parts) == 3
-            else ""
-        )
+        stats, body = prepare_run(run_dir, execution_dir)
+        execution = execution_dir.name
+        scenario = run_dir.parent.parent.name
         lines.append(
-            f"| {scenario} | {run_dir.name} | {run_dir.parent.name} | {stats['Request Count']} | "
+            f"| {execution} | {scenario} | {run_dir.name} | {run_dir.parent.name} | {stats['Request Count']} | "
             f"{stats['Failure Count']} | {number(stats, 'Average Response Time')} | "
             f"{number(stats, '95%')} |"
         )
-        heading = f"{scenario} / " if scenario else ""
+        heading = f"{execution} / {scenario} / "
         sections.extend(
             [f"## {heading}{run_dir.parent.name} / {run_dir.name}", "", *body]
         )
     lines.extend(["", "# Runs", "", "::: {.panel-tabset}", "", *sections, ":::", ""])
-    source = results_dir / "report.qmd"
+    source = execution_dir / "report.qmd"
     source.write_text("\n".join(lines))
     subprocess.run(
         [
@@ -479,10 +482,10 @@ def render_report(
             "report.html",
             "--quiet",
         ],
-        cwd=results_dir,
+        cwd=execution_dir,
         check=True,
     )
     for run_dir in runs:
         for name in ("report.html", "report.qmd"):
             (run_dir / name).unlink(missing_ok=True)
-    return (results_dir / "report.html").resolve()
+    return report.resolve()

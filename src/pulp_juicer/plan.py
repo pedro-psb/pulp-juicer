@@ -32,7 +32,6 @@ class RunMetadata:
     load: LoadConfig
     driver: str
     input_builder: Callable[..., dict]
-    restart_before: bool
     result_dir: Path
 
 
@@ -47,6 +46,7 @@ class TestPlanMetadata:
     compose_command: tuple[str, ...]
     ready_timeout_seconds: float
     runs: tuple[RunMetadata, ...]
+    execution_id: str
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,7 @@ class RunResultMetadata:
     mean_response_ms: float
     p95_response_ms: float
     timed_out: bool
+    load_start_utc: str | None = None
 
 
 def _repository_root(compose_file: Path) -> Path:
@@ -85,6 +86,15 @@ def resolve_workdir(
         else _repository_root(Path(compose_file).resolve())
     )
     return workdir if workdir.is_absolute() else root / workdir
+
+
+def execution_scope(
+    experiment_id: str, scenario_id: str | None = None, run_id: str | None = None
+) -> str:
+    """Name the experiment, scenario, or run selected for an execution."""
+    if run_id is not None and scenario_id is None:
+        raise ValueError("A run ID requires a scenario")
+    return "__".join(part for part in (experiment_id, scenario_id, run_id) if part)
 
 
 def _fixtures(scenario: ScenarioConfig, experiment: ExperimentConfig, workdir: Path):
@@ -134,6 +144,7 @@ def build_test_plan(
     scenario_id: str | None = None,
     candidate_id: int | None = None,
     run_id: str | None = None,
+    execution_id: str | None = None,
 ) -> TestPlanMetadata:
     compose_file = Path(compose_file).resolve()
     root = (
@@ -142,7 +153,12 @@ def build_test_plan(
         else _repository_root(compose_file)
     )
     workdir = resolve_workdir(compose_file, workdir, root)
-    results_dir = Path(results_dir) if results_dir is not None else workdir / "results"
+    if results_dir is None:
+        results_dir = workdir / "results"
+        if execution_id is not None:
+            results_dir /= execution_id
+    else:
+        results_dir = Path(results_dir)
     if not results_dir.is_absolute():
         results_dir = root / results_dir
     if run_id is not None:
@@ -165,13 +181,9 @@ def build_test_plan(
         if scenario_id is not None and scenario.id != scenario_id:
             continue
         fixtures, builds = _fixtures(scenario, experiment, workdir)
-        restart_before = True
         next_number = 1
-        for entry in scenario.runs:
-            if entry == "r":
-                restart_before = True
-                continue
-            if not isinstance(entry, int) or entry not in candidates:
+        for entry in scenario.run_order:
+            if type(entry) is not int or entry not in candidates:
                 raise ValueError(f"Invalid candidate ID in {scenario.id}: {entry!r}")
             if candidate_id is not None and entry != candidate_id:
                 continue
@@ -194,11 +206,9 @@ def build_test_plan(
                     load=scenario.load,
                     driver=scenario.driver,
                     input_builder=scenario.input,
-                    restart_before=restart_before,
                     result_dir=result_dir,
                 )
             )
-            restart_before = False
             if run_id is not None:
                 break
     if not runs:
@@ -213,4 +223,5 @@ def build_test_plan(
         compose_command=tuple(compose_command),
         ready_timeout_seconds=ready_timeout_seconds,
         runs=tuple(runs),
+        execution_id=execution_id or experiment.id,
     )
