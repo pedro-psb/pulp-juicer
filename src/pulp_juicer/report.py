@@ -11,6 +11,8 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 9 -->"
+
 
 def read_csv(path):
     with path.open(newline="") as source:
@@ -223,6 +225,8 @@ def request_starts_per_second(rows, timeline_start, timeline_end):
 
 
 def prepare_run(run_dir, results_dir):
+    from .tasking import task_report_sections
+
     candidate, run_id = run_dir.parent.name, run_dir.name
     scenario = (
         run_dir.parent.parent.name if run_dir.parent.parent != results_dir else None
@@ -382,15 +386,20 @@ def prepare_run(run_dir, results_dir):
                     ]
                 timeline += [f"![PostgreSQL CPU]({asset('report_db_cpu.svg')})", ""]
 
-    if len(timeline) == 2:
-        timeline += ["No timeline data available.", ""]
-    lines += timeline
-    lines += ["### Source files", ""]
+    task_summary, task_distribution, task_timeline = task_report_sections(
+        run_dir, results_dir
+    )
+    lines += task_summary
+    details = []
+    if metadata:
+        details += run_configuration(metadata, history)
+    details += ["### Source files", ""]
     for name, label in (
         ("run_metadata.json", "Run configuration, setup, sources, and result"),
         ("pulp_status.json", "Pulp status after the load test"),
         ("pulp_status_error.txt", "Pulp status capture error"),
         ("compose.log", "Compose service logs"),
+        ("tasking.parquet", "Structured Pulp task records"),
         ("data_load.csv", "Requests selected for this run"),
         ("locust_stats.csv", "Locust summary CSV"),
         ("locust_stats_history.csv", "Locust history CSV"),
@@ -399,12 +408,19 @@ def prepare_run(run_dir, results_dir):
         ("db_cpu_summary.csv", "PostgreSQL CPU summary"),
     ):
         if (run_dir / name).is_file():
-            lines.append(f"- [{label}]({asset(name)})")
-    lines.append("")
-    if metadata:
-        lines += run_configuration(metadata, history)
+            details.append(f"- [{label}]({asset(name)})")
+    details.append("")
+    timeline += task_timeline
+    if len(timeline) == 2:
+        timeline += ["No timeline data available.", ""]
+    graphs = (
+        ["### Wait-time distribution", "", *task_distribution]
+        if task_distribution
+        else []
+    )
+    graphs += timeline
 
-    return stats, lines
+    return stats, lines, graphs, details
 
 
 def completed_runs(execution_dir):
@@ -428,7 +444,21 @@ def render_report(
     execution_dir = Path(execution_dir)
     report = execution_dir / "report.html"
     if report.is_file():
-        return report.resolve()
+        report_time = report.stat().st_mtime_ns
+        tasking_files = list(execution_dir.glob("*/*/*/tasking.parquet"))
+        source = execution_dir / "report.qmd"
+        source_text = source.read_text() if source.is_file() else ""
+        generated_source = (
+            "# Runs" in source_text or "<!-- pulp-juicer-report-layout:" in source_text
+        )
+        layout_stale = (generated_source or bool(tasking_files)) and (
+            not source_text or _REPORT_LAYOUT_MARKER not in source_text
+        )
+        data_stale = any(
+            path.stat().st_mtime_ns > report_time for path in tasking_files
+        )
+        if not layout_stale and not data_stale:
+            return report.resolve()
     runs = list(completed_runs(execution_dir))
     if not runs:
         return None
@@ -449,14 +479,18 @@ def render_report(
         "    embed-resources: true",
         "---",
         "",
+        _REPORT_LAYOUT_MARKER,
+        "",
         "# Overview",
         "",
         "| Execution | Scenario | Run | Candidate | Requests | Failures | Mean response (ms) | p95 (ms) |",
         "|:--|:--|:--|:--|--:|--:|--:|--:|",
     ]
-    sections = []
+    summaries = []
+    graphs = []
+    details = []
     for run_dir in runs:
-        stats, body = prepare_run(run_dir, execution_dir)
+        stats, summary, run_graphs, run_details = prepare_run(run_dir, execution_dir)
         execution = execution_dir.name
         scenario = run_dir.parent.parent.name
         lines.append(
@@ -465,10 +499,27 @@ def render_report(
             f"{number(stats, '95%')} |"
         )
         heading = f"{execution} / {scenario} / "
-        sections.extend(
-            [f"## {heading}{run_dir.parent.name} / {run_dir.name}", "", *body]
+        run_heading = f"## {heading}{run_dir.parent.name} / {run_dir.name}"
+        summaries.extend([run_heading, "", *summary])
+        graphs.extend([run_heading, "", *run_graphs])
+        details.extend([run_heading, "", *run_details])
+    for section_title, sections in (
+        ("Summaries", summaries),
+        ("Graphs", graphs),
+        ("Run configuration and source files", details),
+    ):
+        lines.extend(
+            [
+                "",
+                f"# {section_title}",
+                "",
+                "::: {.panel-tabset}",
+                "",
+                *sections,
+                ":::",
+                "",
+            ]
         )
-    lines.extend(["", "# Runs", "", "::: {.panel-tabset}", "", *sections, ":::", ""])
     source = execution_dir / "report.qmd"
     source.write_text("\n".join(lines))
     subprocess.run(

@@ -134,6 +134,10 @@ def show_experiment(experiment_id):
 )
 def report_results(results_dir, quarto_command):
     """Render detailed and trial comparison reports per execution."""
+    from pyarrow import ArrowException
+
+    from .tasking import analyze_execution_tasking
+
     new_reports = []
     existing_reports = []
     try:
@@ -143,15 +147,29 @@ def report_results(results_dir, quarto_command):
                     r".+__\d{3,}", execution_dir.name
                 ):
                     continue
+                analyze_execution_tasking(execution_dir)
                 for name, renderer in (
                     ("report.html", render_report),
                     ("trials.html", render_trial_report),
                 ):
-                    existing = (execution_dir / name).is_file()
+                    output = execution_dir / name
+                    previous_time = (
+                        output.stat().st_mtime_ns if output.is_file() else None
+                    )
                     report = renderer(execution_dir, quarto_command)
                     if report is not None:
-                        (existing_reports if existing else new_reports).append(report)
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+                        unchanged = (
+                            previous_time is not None
+                            and output.stat().st_mtime_ns == previous_time
+                        )
+                        (existing_reports if unchanged else new_reports).append(report)
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        ArrowException,
+        subprocess.CalledProcessError,
+    ) as exc:
         raise click.ClickException(str(exc)) from exc
     if not new_reports and not existing_reports:
         click.echo(f"No completed runs found under {results_dir}")

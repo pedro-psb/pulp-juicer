@@ -12,15 +12,21 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import pyarrow.parquet as pq
+
 from .report import completed_runs, markdown_value, read_csv
+from .tasking import task_metrics, wait_distribution_chart
 
 _COLORS = ("#2563eb", "#e56b35", "#16a34a", "#a855f7", "#dc2626", "#0891b2")
 _DASHES = ("", "8 4", "3 3", "11 4 3 4")
+_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 10 -->"
 _METRICS = (
     ("completed", "Cumulative completed requests", "Completed requests (count)"),
     ("throughput", "Completed requests per second", "Completed requests/s"),
     ("starts", "New requests per second", "New requests/s"),
     ("cpu", "PostgreSQL CPU", "PostgreSQL CPU (% of one core)"),
+    ("task_starts", "Pulp tasks started per second", "Tasks started/s"),
+    ("task_completions", "Pulp tasks completed per second", "Tasks completed/s"),
 )
 
 
@@ -38,6 +44,7 @@ class Trial:
     cpu_pct: float | None
     metadata: dict | None
     series: dict[str, list[tuple[float, float]]]
+    tasks: list[dict] | None
 
     @property
     def failure_pct(self) -> float | None:
@@ -97,6 +104,34 @@ def _timeline(run_dir: Path, metadata: dict | None):
     return series
 
 
+def _task_series(tasks: list[dict], metadata: dict | None):
+    starts = [row["started_at_utc"] for row in tasks if row["started_at_utc"]]
+    completions = [
+        row["finished_at_utc"]
+        for row in tasks
+        if row["status"] == "completed" and row["finished_at_utc"]
+    ]
+    if not starts and not completions:
+        return {}
+    saved_start = (metadata or {}).get("result", {}).get("load_start_utc")
+    origin = (
+        datetime.fromisoformat(saved_start)
+        if saved_start
+        else min([*starts, *completions])
+    )
+    series = {}
+    for name, events in (("task_starts", starts), ("task_completions", completions)):
+        if events:
+            counts = Counter(
+                math.floor((event - origin).total_seconds()) for event in events
+            )
+            series[name] = [
+                (second, counts[second])
+                for second in range(min(0, *counts), max(0, *counts) + 1)
+            ]
+    return series
+
+
 def _read_trial(run_dir: Path) -> Trial | None:
     rows = read_csv(run_dir / "locust_stats.csv")
     stats = next((row for row in rows if row.get("Name") == "Aggregated"), None)
@@ -115,6 +150,11 @@ def _read_trial(run_dir: Path) -> Trial | None:
     cpu_path = run_dir / "db_cpu_summary.csv"
     cpu_rows = read_csv(cpu_path) if cpu_path.is_file() else []
     requests = int(stats["Request Count"])
+    task_path = run_dir / "tasking.parquet"
+    tasks = pq.read_table(task_path).to_pylist() if task_path.is_file() else None
+    series = _timeline(run_dir, metadata)
+    if tasks:
+        series.update(_task_series(tasks, metadata))
     return Trial(
         directory=run_dir,
         scenario=run_dir.parent.parent.name,
@@ -127,7 +167,8 @@ def _read_trial(run_dir: Path) -> Trial | None:
         p95_ms=_float(stats, "95%"),
         cpu_pct=_float(cpu_rows[0], "postgres_cpu_mean_pct") if cpu_rows else None,
         metadata=metadata,
-        series=_timeline(run_dir, metadata),
+        series=series,
+        tasks=tasks,
     )
 
 
@@ -156,6 +197,170 @@ def _contrast(trials, attribute):
         value for trial in trials if (value := getattr(trial, attribute)) is not None
     ]
     return statistics.median(values) if values else None
+
+
+def _task_summary_lines(execution_dir, scenario, groups, colors):
+    available = [
+        trial
+        for trials in groups.values()
+        for trial in trials
+        if trial.tasks is not None
+    ]
+    if not available:
+        return [], []
+    lines = [
+        "",
+        "### Pulp tasks",
+        "",
+        "Task records include setup and background activity from Compose logs. Throughput is completed tasks divided by the first-to-last task event window. Waiting time is available only for tasks with matching dispatch logs, currently scheduled tasks.",
+        "",
+        "| Candidate | Run | Tasks | Completed | Failed | Throughput (tasks/s) | Task types | Workers | Median execution (ms) | Max execution (ms) | Wait samples | Median wait (ms) | Max wait (ms) |",
+        "|:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
+    ]
+    for candidate, trials in sorted(groups.items()):
+        for trial in trials:
+            if trial.tasks is None:
+                continue
+            metrics = task_metrics(trial.tasks)
+            lines.append(
+                f"| {markdown_value(candidate)} | {markdown_value(trial.run_id)} | "
+                f"{metrics['tasks']} | {metrics['completed']} | {metrics['failed']} | "
+                f"{_format(metrics['throughput'], 2)} | {metrics['task_types']} | "
+                f"{metrics['workers']} | {_format(metrics['median_execution_ms'], 2)} | "
+                f"{_format(metrics['max_execution_ms'], 2)} | {metrics['wait_count']} | "
+                f"{_format(metrics['median_wait_ms'], 2)} | {_format(metrics['max_wait_ms'], 2)} |"
+            )
+    lines += [
+        "",
+        "#### Task counts by candidate",
+        "",
+        "Each value is the median across runs, followed by the run range in parentheses.",
+        "",
+        "| Candidate | Trials with task data | Tasks | Completed | Failed | Throughput (tasks/s) | Median execution (ms) | Median wait (ms) |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|",
+    ]
+    for candidate, trials in sorted(groups.items()):
+        with_tasks = [trial for trial in trials if trial.tasks is not None]
+        if not with_tasks:
+            continue
+        trial_metrics = [task_metrics(trial.tasks) for trial in with_tasks]
+        metric_names = (
+            "tasks",
+            "completed",
+            "failed",
+            "throughput",
+            "median_execution_ms",
+            "median_wait_ms",
+        )
+        metrics = [
+            [item[name] for item in trial_metrics if item[name] is not None]
+            for name in metric_names
+        ]
+
+        def spread(values, digits=0):
+            if not values:
+                return "N/A"
+            middle = _format(statistics.median(values), digits)
+            return (
+                middle
+                if len(values) == 1
+                else f"{middle} ({_format(min(values), digits)}–{_format(max(values), digits)})"
+            )
+
+        lines.append(
+            f"| {markdown_value(candidate)} | {len(with_tasks)} | "
+            + " | ".join(
+                spread(values, 2 if index >= 3 else 0)
+                for index, values in enumerate(metrics)
+            )
+            + " |"
+        )
+    lines += [
+        "",
+        "#### Most frequent task types",
+        "",
+        "| Candidate | Task type | Tasks | Completed | Failed | Max execution (ms) |",
+        "|:--|:--|--:|--:|--:|--:|",
+    ]
+    grouped = defaultdict(list)
+    for candidate, trials in groups.items():
+        for trial in trials:
+            for row in trial.tasks or []:
+                grouped[(candidate, row["task_type"] or "Unknown")].append(row)
+    for candidate in sorted(groups):
+        types = [
+            (task_type, rows)
+            for (name, task_type), rows in grouped.items()
+            if name == candidate
+        ]
+        for task_type, rows in sorted(types, key=lambda item: (-len(item[1]), item[0]))[
+            :10
+        ]:
+            durations = [
+                row["execution_time_us"] / 1000
+                for row in rows
+                if row["execution_time_us"] is not None
+            ]
+            lines.append(
+                f"| {markdown_value(candidate)} | {markdown_value(task_type)} | {len(rows)} | "
+                f"{sum(row['status'] == 'completed' for row in rows)} | "
+                f"{sum(row['status'] == 'failed' for row in rows)} | "
+                f"{_format(max(durations) if durations else None, 2)} |"
+            )
+    lines += [
+        "",
+        "#### Longest execution by task type",
+        "",
+        "| Candidate | Task type | Max execution (ms) |",
+        "|:--|:--|--:|",
+    ]
+    for candidate in sorted(groups):
+        types = []
+        for (name, task_type), rows in grouped.items():
+            if name == candidate:
+                durations = [
+                    row["execution_time_us"] / 1000
+                    for row in rows
+                    if row["execution_time_us"] is not None
+                ]
+                if durations:
+                    types.append((task_type, max(durations)))
+        for task_type, maximum in sorted(types, key=lambda item: (-item[1], item[0]))[
+            :10
+        ]:
+            lines.append(
+                f"| {markdown_value(candidate)} | {markdown_value(task_type)} | {_format(maximum, 2)} |"
+            )
+    lines.append("")
+    traces = [
+        (
+            f"{candidate} / {trial.run_id}",
+            colors[candidate],
+            [
+                row["waiting_time_us"] / 1000
+                for row in trial.tasks or []
+                if row.get("waiting_time_us") is not None
+            ],
+            len(trial.tasks or []),
+        )
+        for candidate, trials in sorted(groups.items())
+        for trial in trials
+    ]
+    safe_scenario = re.sub(r"[^A-Za-z0-9_-]+", "_", scenario)
+    name = f"trials_{safe_scenario}_wait_distribution.svg"
+    distribution = []
+    if wait_distribution_chart(execution_dir / name, traces):
+        distribution = [
+            "### Wait-time distribution",
+            "",
+            "#### Dispatch-to-start wait distribution",
+            "",
+            "Each color shows one run; bars within each labeled millisecond range are side by side. Counts include only tasks with both dispatch and start log entries. The legend shows coverage against all logged tasks.",
+            "",
+            f"![Dispatch-to-start wait distribution]({name})",
+            "",
+        ]
+    return lines, distribution
 
 
 def _chart(path: Path, label: str, traces: list[tuple[str, str, str, list]]):
@@ -242,7 +447,7 @@ def _chart(path: Path, label: str, traces: list[tuple[str, str, str, list]]):
     path.write_text("\n".join(items) + "\n")
 
 
-def _scenario_section(execution_dir, scenario, trials, colors):
+def _scenario_sections(execution_dir, scenario, trials, colors):
     lines = [
         f"## {markdown_value(scenario)}",
         "",
@@ -325,8 +530,14 @@ def _scenario_section(execution_dir, scenario, trials, colors):
             "",
             "Some runs have no run metadata, so their completion and configuration could not be verified.",
         ]
-    lines += [
+    task_summary, distribution = _task_summary_lines(
+        execution_dir, scenario, groups, colors
+    )
+    lines.extend(task_summary)
+    graphs = [
+        f"## {markdown_value(scenario)}",
         "",
+        *distribution,
         "### Time overlays",
         "",
         (
@@ -353,10 +564,10 @@ def _scenario_section(execution_dir, scenario, trials, colors):
             safe_scenario = re.sub(r"[^A-Za-z0-9_-]+", "_", scenario)
             name = f"trials_{safe_scenario}_{metric}.svg"
             _chart(execution_dir / name, axis_label, traces)
-            lines += [f"#### {title}", "", f"![{title}]({name})", ""]
+            graphs += [f"#### {title}", "", f"![{title}]({name})", ""]
     if not any(trial.series for trial in trials):
-        lines += ["No request timelines available.", ""]
-    return lines
+        graphs += ["No request timelines available.", ""]
+    return lines, graphs
 
 
 def render_trial_report(
@@ -366,7 +577,15 @@ def render_trial_report(
     execution_dir = Path(execution_dir)
     report = execution_dir / "trials.html"
     if report.is_file():
-        return report.resolve()
+        source = execution_dir / "trials.qmd"
+        task_data_is_newer = any(
+            path.stat().st_mtime_ns > report.stat().st_mtime_ns
+            for path in execution_dir.glob("*/*/*/tasking.parquet")
+        )
+        if not task_data_is_newer and (
+            not source.is_file() or _TRIAL_LAYOUT_MARKER in source.read_text()
+        ):
+            return report.resolve()
     trials = [
         trial
         for run_dir in completed_runs(execution_dir)
@@ -397,6 +616,8 @@ def render_trial_report(
         "    embed-resources: true",
         "---",
         "",
+        _TRIAL_LAYOUT_MARKER,
+        "",
         "# Trial and candidate comparison",
         "",
         (
@@ -409,12 +630,18 @@ def render_trial_report(
             "Runs from other executions are not included. Run order and shared host conditions may affect candidate differences."
         ),
         "",
+        "# Summaries",
+        "",
     ]
+    graphs = ["# Graphs", ""]
     for scenario, scenario_trials in sorted(groups.items()):
         scenario_trials.sort(key=lambda trial: trial.run_id)
-        lines.extend(
-            _scenario_section(execution_dir, scenario, scenario_trials, colors)
+        summary, scenario_graphs = _scenario_sections(
+            execution_dir, scenario, scenario_trials, colors
         )
+        lines.extend(summary)
+        graphs.extend(scenario_graphs)
+    lines.extend(graphs)
     source = execution_dir / "trials.qmd"
     source.write_text("\n".join(lines))
     subprocess.run(
