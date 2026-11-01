@@ -13,7 +13,8 @@ from click.testing import CliRunner
 from experiments.maven_pull_through.experiment import EXPERIMENT
 from pulp_juicer.cli import cli
 from pulp_juicer.plan import build_test_plan
-from pulp_juicer.plan_file import load_plan_file
+from pulp_juicer.plan_file import load_plan_file, write_plan_file
+from pulp_juicer.types import LoadStep, StepFunctionLoad, UnitaryImpulseLoad
 
 COMPOSE = (
     Path(__file__).resolve().parents[1]
@@ -23,6 +24,47 @@ TOTAL_RUNS = sum(len(scenario.run_order) for scenario in EXPERIMENT.scenarios)
 
 
 class TestPlan(unittest.TestCase):
+    def test_load_profiles_derive_locust_settings(self):
+        impulse = UnitaryImpulseLoad(request_count=50)
+        self.assertEqual((impulse.users, impulse.spawn_rate_per_second), (50, 50))
+        self.assertEqual(impulse.max_duration, "5m")
+
+        steps = StepFunctionLoad((LoadStep(0, 10), LoadStep(30, 40)))
+        self.assertEqual(steps.users, 40)
+        self.assertEqual(steps.spawn_rate(10, 40), 30)
+        self.assertEqual(steps.max_duration, "5m")
+
+    def test_step_profile_rejects_out_of_order_steps(self):
+        with self.assertRaisesRegex(ValueError, "start at 0"):
+            StepFunctionLoad((LoadStep(1, 2),), max_duration="5s")
+        with self.assertRaisesRegex(ValueError, "must increase"):
+            StepFunctionLoad((LoadStep(0, 2), LoadStep(0, 3)), max_duration="5s")
+
+    def test_saved_plan_restores_both_load_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for scenario_id, profile_type in (
+                ("calibrate", UnitaryImpulseLoad),
+                ("burst", StepFunctionLoad),
+            ):
+                with self.subTest(scenario=scenario_id):
+                    plan = build_test_plan(
+                        EXPERIMENT,
+                        COMPOSE,
+                        repository_root=root,
+                        execution_id=f"{scenario_id}__001",
+                        scenario_id=scenario_id,
+                    )
+                    path = write_plan_file(plan)
+                    saved = json.loads(path.read_text())
+                    self.assertEqual(
+                        saved["scenarios"][0]["runs"][0]["load"]["profile"],
+                        profile_type.__name__,
+                    )
+                    restored = load_plan_file(path)
+                    self.assertIsInstance(restored.runs[0].load, profile_type)
+                    self.assertEqual(restored.runs[0].load, plan.runs[0].load)
+
     def test_expands_run_order_without_building_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -32,9 +74,9 @@ class TestPlan(unittest.TestCase):
             self.assertEqual(len(plan.runs), TOTAL_RUNS)
             self.assertEqual(
                 [run.candidate.id for run in plan.runs if run.scenario_id == "burst"],
-                [1, 1, 2, 2],
+                [1, 2, 2, 1],
             )
-            self.assertEqual([run.candidate.id for run in plan.runs[:3]], [1, 2, 1])
+            self.assertEqual([run.candidate.id for run in plan.runs[:3]], [1, 2, 2])
             self.assertEqual(len({run.result_dir for run in plan.runs}), len(plan.runs))
             fixture = plan.runs[0].fixtures["maven"]
             self.assertTrue(fixture.output_dir.is_absolute())
@@ -296,8 +338,12 @@ class TestCli(unittest.TestCase):
         self.assertNotIn("  burst:", run_without_experiment.output)
         self.assertNotIn("  calibrate:", run_without_experiment.output)
         self.assertNotIn("run001", run_without_experiment.output)
-        self.assertIn("Usage:", run_without_experiment.output)
-        self.assertIn("Missing argument 'EXPERIMENT_ID'", run_without_experiment.output)
+        self.assertIn("Available experiments:\n", run_without_experiment.output)
+        self.assertIn(
+            "Use pulp-juicer squeeze EXPERIMENT to list available runs.",
+            run_without_experiment.output,
+        )
+        self.assertNotIn("Usage:", run_without_experiment.output)
         self.assertIn(
             "maven-pull-through: Compare Maven pull-through candidates under two load patterns.",
             listed.output,
@@ -316,6 +362,22 @@ class TestCli(unittest.TestCase):
             runner.invoke(cli, ["ls", "maven-pull-through"]).exit_code, 0
         )
 
+        shown_without_experiment = runner.invoke(cli, ["show"])
+        self.assertEqual(
+            shown_without_experiment.exit_code, 0, shown_without_experiment.output
+        )
+        self.assertIn("Available experiments:\n", shown_without_experiment.output)
+        self.assertIn(
+            "maven-pull-through: Compare Maven pull-through candidates under two load patterns.",
+            shown_without_experiment.output,
+        )
+        self.assertIn(
+            "Use pulp-juicer show EXPERIMENT for details.",
+            shown_without_experiment.output,
+        )
+        self.assertNotIn("  burst:", shown_without_experiment.output)
+        self.assertNotIn("Required sources:", shown_without_experiment.output)
+
         shown = runner.invoke(cli, ["show", "maven-pull-through"])
         self.assertEqual(shown.exit_code, 0, shown.output)
         self.assertNotIn(
@@ -328,7 +390,14 @@ class TestCli(unittest.TestCase):
             "burst: Thirty concurrent users request 650 unique Maven artifacts. (4 runs, 30 users)",
             shown.output,
         )
-        self.assertIn("  1: normal\n", shown.output)
+        self.assertIn(
+            "1: normal — Released Pulp sources with standard Maven repository behavior.",
+            shown.output,
+        )
+        self.assertIn(
+            f"2: staging — {EXPERIMENT.candidates[1].description}",
+            shown.output,
+        )
         self.assertNotIn("baseline", shown.output)
         run_rows = [
             line.split() for line in shown.output.split("Runs:\n", 1)[1].splitlines()
@@ -376,6 +445,10 @@ class TestCli(unittest.TestCase):
             self.assertNotIn("password", data["runtime"]["pulp_connection"])
             self.assertEqual(data["execution_id"], "maven-pull-through__burst__002")
             saved_candidate = data["scenarios"][0]["runs"][0]["candidate"]
+            self.assertEqual(
+                saved_candidate["description"],
+                "Released Pulp sources with standard Maven repository behavior.",
+            )
             self.assertEqual(
                 saved_candidate["pre_test_functions"],
                 ["Create Maven remote, repository, and distribution"],

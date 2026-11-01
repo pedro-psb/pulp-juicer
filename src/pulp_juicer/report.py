@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 11 -->"
+_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 13 -->"
 
 
 def read_csv(path):
@@ -42,9 +42,23 @@ def run_configuration(metadata, history):
         f"| Fixture COUNT (artifacts for candidate) | {fixture['count']} |",
         f"| Fixture ID requested at setup | {markdown_value(fixture['requested_fixture_id'])} |",
         f"| Payload bytes requested at setup | {fixture['requested_payload_bytes']} |",
+        f"| Load profile | {markdown_value(load.get('profile', 'UnitaryImpulseLoad'))} |",
         f"| Concurrent users (configured) | {load['users']} |",
         f"| Peak active users (observed) | {max(int(row['User Count']) for row in history) if history else 'N/A'} |",
-        f"| Spawn rate | {load['spawn_rate']} users/s |",
+        *(
+            [
+                "| User steps | "
+                + markdown_value(
+                    "; ".join(
+                        f"{step['at_seconds']}s: {step['users']} users"
+                        for step in load["steps"]
+                    )
+                )
+                + " |"
+            ]
+            if load.get("steps")
+            else []
+        ),
         f"| Maximum duration | {markdown_value(load['duration'])} |",
         f"| Wait between requests | {load['wait_seconds']} s |",
         f"| Idle before load | {load['idle_seconds']} s |",

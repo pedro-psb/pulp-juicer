@@ -12,7 +12,7 @@ from .types import (
     ExperimentConfig,
     Fixture,
     FixtureMetadata,
-    LoadConfig,
+    LoadProfile,
     PulpConnection,
     ScenarioConfig,
     ServiceFixtureMetadata,
@@ -29,7 +29,7 @@ class RunMetadata:
     run_id: str
     fixtures: Mapping[str, FixtureMetadata]
     fixture_builds: tuple[Fixture, ...]
-    load: LoadConfig
+    load: LoadProfile
     driver: str
     input_builder: Callable[..., dict]
     result_dir: Path

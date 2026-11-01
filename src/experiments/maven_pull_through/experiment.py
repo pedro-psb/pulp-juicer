@@ -5,10 +5,12 @@ from pathlib import Path
 from pulp_juicer import (
     CandidateConfig,
     ExperimentConfig,
-    LoadConfig,
+    LoadStep,
     PreTestFunction,
     RequireFixture,
     ScenarioConfig,
+    StepFunctionLoad,
+    UnitaryImpulseLoad,
 )
 
 from . import candidates, scenario_input
@@ -33,6 +35,7 @@ EXPERIMENT = ExperimentConfig(
         CandidateConfig(
             id=1,
             name="normal",
+            description="Released Pulp sources with standard Maven repository behavior.",
             sources={
                 "pulpcore": "https://github.com/pulp/pulpcore.git#3.123.1",
                 "pulp_maven": "https://github.com/pulp/pulp_maven.git#0.37.0",
@@ -47,6 +50,7 @@ EXPERIMENT = ExperimentConfig(
         CandidateConfig(
             id=2,
             name="staging",
+            description="Bucket repository implementation with repository staging area concept.",
             sources={
                 "pulpcore": "../pulpcore",
                 "pulp_maven": "../pulp_maven",
@@ -69,16 +73,7 @@ EXPERIMENT = ExperimentConfig(
             ),
             input=scenario_input.build_pull_through,
             run_order=(1, 2, 2, 1, 2, 2, 1, 1),
-            load=LoadConfig(
-                users=1000,
-                request_count=1000,
-                spawn_rate_per_second=1000,
-                max_duration="5m",
-                wait_seconds=0,
-                idle_before_seconds=5,
-                tail_after_seconds=5,
-                request_timeout_seconds=60,
-            ),
+            load=UnitaryImpulseLoad(request_count=1000),
         ),
         ScenarioConfig(
             id="burst",
@@ -88,16 +83,10 @@ EXPERIMENT = ExperimentConfig(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            run_order=(1, 1, 2, 2),
-            load=LoadConfig(
-                users=30,
+            run_order=(1, 2, 2, 1),
+            load=StepFunctionLoad(
+                steps=(LoadStep(at_seconds=0, users=30),),
                 request_count=650,
-                spawn_rate_per_second=30,
-                max_duration="5m",
-                wait_seconds=0,
-                idle_before_seconds=5,
-                tail_after_seconds=5,
-                request_timeout_seconds=60,
             ),
         ),
         ScenarioConfig(
@@ -108,16 +97,10 @@ EXPERIMENT = ExperimentConfig(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            run_order=(1,),
-            load=LoadConfig(
-                users=10,
-                request_count=120,
-                spawn_rate_per_second=10,
-                max_duration="5m",
-                wait_seconds=0,
-                idle_before_seconds=5,
-                tail_after_seconds=5,
-                request_timeout_seconds=60,
+            run_order=(1, 2),
+            load=StepFunctionLoad(
+                steps=(LoadStep(at_seconds=0, users=30),),
+                request_count=650,
             ),
         ),
     ),

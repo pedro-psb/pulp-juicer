@@ -246,7 +246,7 @@ class TestTasking(unittest.TestCase):
                 source_path = execution / "report.qmd"
                 source_path.write_text(
                     source_path.read_text().replace(
-                        "<!-- pulp-juicer-report-layout: 11 -->", ""
+                        "<!-- pulp-juicer-report-layout: 13 -->", ""
                     )
                 )
                 third = CliRunner().invoke(
@@ -262,7 +262,7 @@ class TestTasking(unittest.TestCase):
             self.assertIn(f"Existing:\n{execution / 'report.html'}", second.output)
             self.assertTrue((run_dir / "tasking.parquet").is_file())
             report_source = (execution / "report.qmd").read_text()
-            self.assertIn("<!-- pulp-juicer-report-layout: 11 -->", report_source)
+            self.assertIn("<!-- pulp-juicer-report-layout: 13 -->", report_source)
             self.assertIn("#### Pulp tasks", report_source)
             self.assertIn("Most frequent task types", report_source)
             self.assertIn("Total execution time by task type", report_source)

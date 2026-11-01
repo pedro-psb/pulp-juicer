@@ -15,11 +15,34 @@ from locust import HttpUser, constant, task
 from locust.env import Environment
 from locust.event import Events
 from locust.exception import StopUser
+from locust.runners import STATE_CLEANUP, STATE_STOPPED, STATE_STOPPING
 from locust.stats import PERCENTILES_TO_REPORT, StatsCSV, StatsCSVFileWriter
 from locust.util.timespan import parse_timespan
 
 from .db_cpu_monitor import DBCpuMonitor
 from .plan import RunMetadata, RunResultMetadata
+from .types import StepFunctionLoad, UnitaryImpulseLoad
+
+
+def _start_step_load(runner, load: StepFunctionLoad, is_complete: Callable[[], bool]):
+    """Start the first target and schedule later user-count changes."""
+    started_at = time.monotonic()
+    runner.start(load.steps[0].users, load.spawn_rate(0, load.steps[0].users))
+
+    def apply_steps():
+        previous_users = load.steps[0].users
+        for step in load.steps[1:]:
+            gevent.sleep(max(0, started_at + step.at_seconds - time.monotonic()))
+            if is_complete() or runner.state in {
+                STATE_CLEANUP,
+                STATE_STOPPED,
+                STATE_STOPPING,
+            }:
+                return
+            runner.start(step.users, load.spawn_rate(previous_users, step.users))
+            previous_users = step.users
+
+    return gevent.spawn(apply_steps)
 
 
 def clean_incomplete_results(output: Path) -> None:
@@ -105,6 +128,11 @@ def _run_created(
     requests = tuple(request_input["requests"])
     if not base_url or not requests:
         raise ValueError("http_get input needs a base_url and at least one request")
+    if (
+        isinstance(metadata.load, UnitaryImpulseLoad)
+        and len(requests) != metadata.load.request_count
+    ):
+        raise ValueError("Impulse request count must match the generated request list")
     wait_seconds = float(request_input.get("wait_seconds", metadata.load.wait_seconds))
     state = {
         "base_url": base_url,
@@ -123,6 +151,7 @@ def _run_created(
     deadline = None
     cpu = None
     progress_greenlet = None
+    step_greenlet = None
 
     def report_stats():
         if on_progress is None:
@@ -168,6 +197,8 @@ def _run_created(
                     and hashlib.sha256(response.content).hexdigest() != item["sha256"]
                 ):
                     response.failure(f"SHA256 mismatch: {path}")
+            if isinstance(metadata.load, UnitaryImpulseLoad):
+                raise StopUser()
 
     def stop_at_deadline():
         nonlocal timed_out
@@ -280,8 +311,13 @@ def _run_created(
                 cpu.start()
             csv_greenlet = gevent.spawn(csv_writer.stats_writer)
             if on_progress:
+                action = (
+                    "scheduling up to"
+                    if isinstance(metadata.load, StepFunctionLoad)
+                    else "starting"
+                )
                 on_progress(
-                    f"Locust: starting {metadata.load.users} users for {len(requests)} requests"
+                    f"Locust: {action} {metadata.load.users} users for {len(requests)} requests"
                 )
             if metadata.load.idle_before_seconds:
                 gevent.sleep(metadata.load.idle_before_seconds)
@@ -289,7 +325,14 @@ def _run_created(
             if on_progress:
                 on_progress("Load test starting")
             load_start_utc = datetime.now(UTC).isoformat(timespec="microseconds")
-            runner.start(metadata.load.users, metadata.load.spawn_rate_per_second)
+            if isinstance(metadata.load, StepFunctionLoad):
+                step_greenlet = _start_step_load(
+                    runner,
+                    metadata.load,
+                    lambda: completed >= len(state["requests"]),
+                )
+            else:
+                runner.start(metadata.load.users, metadata.load.spawn_rate_per_second)
             if on_progress:
                 on_progress("Load test started")
             if on_progress:
@@ -308,6 +351,8 @@ def _run_created(
                 deadline.kill()
             if progress_greenlet is not None:
                 progress_greenlet.kill(block=True)
+            if step_greenlet is not None:
+                step_greenlet.kill(block=True)
             try:
                 runner.quit()
             finally:

@@ -12,10 +12,10 @@ from pulp_juicer.compose_runtime import ComposeRuntime
 from pulp_juicer.execution import _write_run_context, execute_test_plan
 from pulp_juicer.plan import RunMetadata, RunResultMetadata
 from pulp_juicer.types import (
-    LoadConfig,
     PreTestFunction,
     PulpConnection,
     ServiceFixtureMetadata,
+    UnitaryImpulseLoad,
 )
 
 
@@ -135,9 +135,7 @@ class TestExecution(unittest.TestCase):
                 "run001",
                 {"maven": fixture},
                 (SimpleNamespace(count=1, size=1024),),
-                LoadConfig(
-                    users=2, spawn_rate_per_second=2, max_duration="5s", request_count=1
-                ),
+                UnitaryImpulseLoad(request_count=1, max_duration="5s"),
                 "http_get",
                 lambda *args: {},
                 output,
@@ -179,6 +177,7 @@ class TestExecution(unittest.TestCase):
             self.assertEqual(metadata["candidate_id"], 1)
             self.assertEqual(metadata["pre_test_functions"], ["Create test resources"])
             self.assertEqual(metadata["load"]["request_count"], 1)
+            self.assertEqual(metadata["load"]["profile"], "UnitaryImpulseLoad")
             self.assertEqual(metadata["load"]["request_timeout_seconds"], 60)
             self.assertEqual(metadata["setup"]["base_url"], "http://pulp/")
             self.assertEqual(metadata["result"]["p95_response_ms"], 20.0)
@@ -205,7 +204,7 @@ class TestExecution(unittest.TestCase):
                 "run001",
                 {},
                 (),
-                LoadConfig(users=1, spawn_rate_per_second=1, max_duration="1s"),
+                UnitaryImpulseLoad(request_count=1, max_duration="1s"),
                 "http_get",
                 lambda *args: {
                     "base_url": "http://example.test/",
@@ -290,7 +289,7 @@ class TestExecution(unittest.TestCase):
                 "run001",
                 {},
                 (),
-                LoadConfig(users=1, spawn_rate_per_second=1, max_duration="1s"),
+                UnitaryImpulseLoad(request_count=1, max_duration="1s"),
                 "http_get",
                 lambda *args: {
                     "base_url": "http://example.test/",
@@ -398,7 +397,7 @@ class TestExecution(unittest.TestCase):
                 },
                 pre_test_functions=pre_test_functions(),
             )
-            load = LoadConfig(users=1, spawn_rate_per_second=1, max_duration="1s")
+            load = UnitaryImpulseLoad(request_count=1, max_duration="1s")
             input_builder = Mock(
                 return_value={
                     "base_url": "http://example.test/",
@@ -575,7 +574,7 @@ class TestExecution(unittest.TestCase):
                 "run001",
                 {},
                 (),
-                LoadConfig(users=1, spawn_rate_per_second=1, max_duration="1s"),
+                UnitaryImpulseLoad(request_count=1, max_duration="1s"),
                 "http_get",
                 lambda *args: {
                     "base_url": "http://example.test/",

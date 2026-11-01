@@ -1,6 +1,7 @@
 """Compare runs as trials within each scenario of one execution."""
 
 import html
+import itertools
 import json
 import math
 import re
@@ -20,7 +21,7 @@ from .report import completed_runs, markdown_value, read_csv
 from .tasking import task_metrics
 
 _COLORS = ("#2563eb", "#e56b35", "#16a34a", "#a855f7", "#dc2626", "#0891b2")
-_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 21 -->"
+_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 22 -->"
 _METRICS = (
     ("completed", "Cumulative completed requests", "Completed requests (count)"),
     ("throughput", "Completed requests per second", "Completed requests/s"),
@@ -414,15 +415,48 @@ def _median_curve(runs):
     return curve
 
 
-def _chart(path: Path, label: str, groups):
+def _smoothed_mean_rate(runs, bandwidth_s=3):
+    """Smooth the run mean rate while preserving its request-count integral."""
+    counts = Counter()
+    for _, points in runs:
+        for second, count in points:
+            counts[int(second)] += count / len(runs)
+    if not counts:
+        return []
+    radius = math.ceil(3 * bandwidth_s)
+    last_second = max(counts) + radius
+    weights = {
+        offset: math.exp(-0.5 * (offset / bandwidth_s) ** 2)
+        for offset in range(-radius, radius + 1)
+    }
+    smoothed = [0.0] * (last_second + 1)
+    for second, count in counts.items():
+        if not count:
+            continue
+        positions = range(
+            max(0, second - radius), min(last_second, second + radius) + 1
+        )
+        normalizer = sum(weights[position - second] for position in positions)
+        for position in positions:
+            smoothed[position] += count * weights[position - second] / normalizer
+    area = sum((a + b) / 2 for a, b in itertools.pairwise(smoothed))
+    scale = sum(counts.values()) / area if area else 1
+    return [(second, value * scale) for second, value in enumerate(smoothed)]
+
+
+def _chart(
+    path: Path, label: str, groups, *, summary_fn=_median_curve, summary_label="median"
+):
     if not groups:
         return
+    summaries = {candidate: summary_fn(runs) for candidate, _, runs in groups}
     width, left, right = 960, 84, 24
     top, plot_height = 30, 300
     bottom = top + plot_height
     legend_top = bottom + 66
     height = legend_top + len(groups) * 44 + 18
     values = [point for _, _, runs in groups for _, series in runs for point in series]
+    values += [point for points in summaries.values() for point in points]
     x_min = min(0, *(x for x, _ in values))
     x_max = max(1, *(x for x, _ in values))
     y_max = max(1, *(y for _, y in values)) * 1.05
@@ -475,18 +509,18 @@ def _chart(path: Path, label: str, groups):
                 f'data-candidate="{html.escape(candidate, quote=True)}" data-run="{html.escape(run_id, quote=True)}">'
                 f"<title>{html.escape(candidate)} / {html.escape(run_id)}</title></polyline>"
             )
-        median_points = _median_curve(runs)
+        summary_points = summaries[candidate]
         coordinates = " ".join(
-            f"{x:.1f},{y:.1f}" for x, y in (xy(*point) for point in median_points)
+            f"{x:.1f},{y:.1f}" for x, y in (xy(*point) for point in summary_points)
         )
         items.append(
             f'<polyline points="{coordinates}" fill="none" stroke="{color}" '
-            'stroke-width="3.5" data-series="median" '
+            f'stroke-width="3.5" data-series="{summary_label.replace(" ", "-")}" '
             f'data-candidate="{html.escape(candidate, quote=True)}"/>'
         )
         for offset, name, opacity, thickness in (
             (0, f"{candidate} runs (n={len(runs)})", "0.22", "1.5"),
-            (22, f"{candidate} median", "1", "3.5"),
+            (22, f"{candidate} {summary_label}", "1", "3.5"),
         ):
             y = legend_y + offset
             items += [
@@ -731,7 +765,7 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
         "",
         (
             "Time zero is the recorded load start; older results use the first request start. "
-            "Faint lines show individual runs in each candidate's color; thick lines show the pointwise median across runs observed at each time. The median is descriptive, with no extrapolation beyond a run's observed window."
+            "Faint lines show individual runs in each candidate's color. For completed requests per second, thick lines show a Gaussian-smoothed mean (3 s bandwidth); their area equals the mean completed-request count. Other thick lines show the pointwise median across runs observed at each time, with no extrapolation beyond a run's observed window."
         ),
         "",
     ]
@@ -748,7 +782,16 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
         if chart_groups:
             safe_scenario = re.sub(r"[^A-Za-z0-9_-]+", "_", scenario)
             name = f"trials_{safe_scenario}_{metric}.svg"
-            _chart(execution_dir / name, axis_label, chart_groups)
+            if metric == "throughput":
+                _chart(
+                    execution_dir / name,
+                    axis_label,
+                    chart_groups,
+                    summary_fn=_smoothed_mean_rate,
+                    summary_label="smoothed mean",
+                )
+            else:
+                _chart(execution_dir / name, axis_label, chart_groups)
             graphs += [f"#### {title}", "", f"![{title}]({name})", ""]
     if not any(trial.series for trial in trials):
         graphs += ["No request timelines available.", ""]

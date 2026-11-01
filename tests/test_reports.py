@@ -1,5 +1,6 @@
 """Each execution has its own report, rendered only once."""
 
+import itertools
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -18,6 +19,7 @@ from pulp_juicer.tasking import TASK_SCHEMA
 from pulp_juicer.trial_report import (
     _mean_sd,
     _median_curve,
+    _smoothed_mean_rate,
     _task_gantt,
     render_trial_report,
 )
@@ -37,6 +39,19 @@ class TestReportDiscovery(unittest.TestCase):
             _median_curve(runs),
             [(0, 1), (1, 3), (2, 5), (3, 8)],
         )
+
+    def test_smoothed_mean_rate_preserves_mean_completed_requests(self):
+        runs = [
+            ("run001", [(0, 4), (1, 0), (2, 0)]),
+            ("run002", [(0, 0), (1, 0), (2, 2)]),
+        ]
+        curve = _smoothed_mean_rate(runs)
+        area = sum(
+            (a[1] + b[1]) * (b[0] - a[0]) / 2 for a, b in itertools.pairwise(curve)
+        )
+        self.assertAlmostEqual(area, 3)
+        self.assertGreater(curve[1][1], 0)
+        self.assertTrue(all(value >= 0 for _, value in curve))
 
     def test_task_gantt_uses_logged_duration_and_skips_partial_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -393,7 +408,14 @@ class TestReportDiscovery(unittest.TestCase):
                     else "staging / run004",
                     svg.read_text(),
                 )
-                self.assertIn('data-series="median"', svg.read_text())
+                self.assertIn(
+                    'data-series="smoothed-mean"'
+                    if metric == "throughput"
+                    else 'data-series="median"',
+                    svg.read_text(),
+                )
+                if metric == "throughput":
+                    self.assertIn("normal smoothed mean", svg.read_text())
                 self.assertIn(
                     'stroke-opacity="0.22" data-series="run"', svg.read_text()
                 )
@@ -428,7 +450,7 @@ class TestReportDiscovery(unittest.TestCase):
 
             source_path = execution / "trials.qmd"
             source_path.write_text(
-                source.replace("<!-- pulp-juicer-trial-layout: 21 -->", "")
+                source.replace("<!-- pulp-juicer-trial-layout: 22 -->", "")
             )
             with (
                 patch(
@@ -441,7 +463,7 @@ class TestReportDiscovery(unittest.TestCase):
                 self.assertEqual(render_trial_report(execution), report)
             refreshed.assert_called_once()
             self.assertIn(
-                "<!-- pulp-juicer-trial-layout: 21 -->", source_path.read_text()
+                "<!-- pulp-juicer-trial-layout: 22 -->", source_path.read_text()
             )
 
     def test_existing_report_needs_no_quarto(self):

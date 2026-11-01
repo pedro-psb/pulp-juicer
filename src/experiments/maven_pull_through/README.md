@@ -3,6 +3,8 @@
 `experiment.py` defines fixture instances, candidates, scenarios, and run order.
 Candidate IDs are positive integers.
 Each scenario uses its own `request_count`, which may be less than the fixture capacity.
+Each candidate has a short description shown by `pulp-juicer show maven-pull-through`.
+`UnitaryImpulseLoad(request_count=N)` starts N users, each making one request. `StepFunctionLoad` changes the target user count at each `LoadStep(at_seconds, users)` and derives a spawn rate for each change. Burst and temporary scenarios currently have one step, preserving their user targets and request counts. Duration, waits, and timeouts use profile defaults.
 The burst scenario runs normal and staging twice. Pulp volumes are reset before every run; generated fixture data remains on disk.
 
 ## Candidate sources

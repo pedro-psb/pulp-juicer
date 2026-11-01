@@ -9,13 +9,15 @@ from pathlib import Path
 from .catalog import experiments
 from .plan import RunMetadata, TestPlanMetadata
 from .types import (
-    LoadConfig,
+    LoadStep,
     PulpConnection,
     ServiceFixtureMetadata,
+    StepFunctionLoad,
+    UnitaryImpulseLoad,
     VolumeFixtureMetadata,
 )
 
-VERSION = 7
+VERSION = 10
 
 
 def _unit(run: RunMetadata) -> dict:
@@ -28,6 +30,7 @@ def _unit(run: RunMetadata) -> dict:
         "candidate": {
             "id": run.candidate.id,
             "name": run.candidate.name,
+            "description": run.candidate.description,
             "sources": dict(run.candidate.sources),
             "pre_test_functions": [
                 hook.description for hook in run.candidate.pre_test_functions
@@ -37,7 +40,7 @@ def _unit(run: RunMetadata) -> dict:
         "fixture_builds": [
             {"class": type(item).__name__, **vars(item)} for item in run.fixture_builds
         ],
-        "load": asdict(run.load),
+        "load": {"profile": type(run.load).__name__, **asdict(run.load)},
         "driver": run.driver,
         "result_dir": str(run.result_dir),
     }
@@ -125,6 +128,15 @@ def _hydrate_run(
         if type(template).__name__ != data["class"]:
             raise ValueError(f"Fixture class changed for {name}")
         builds.append(type(template)(name=name, **values))
+    load_data = dict(unit["load"])
+    profile = load_data.pop("profile")
+    if profile == "UnitaryImpulseLoad":
+        load = UnitaryImpulseLoad(**load_data)
+    elif profile == "StepFunctionLoad":
+        load_data["steps"] = tuple(LoadStep(**step) for step in load_data["steps"])
+        load = StepFunctionLoad(**load_data)
+    else:
+        raise ValueError(f"Unknown load profile: {profile}")
     return RunMetadata(
         experiment_id=experiment.id,
         scenario_id=scenario_id,
@@ -132,7 +144,7 @@ def _hydrate_run(
         run_id=unit["run_id"],
         fixtures=fixtures,
         fixture_builds=tuple(builds),
-        load=LoadConfig(**unit["load"]),
+        load=load,
         driver=unit["driver"],
         input_builder=input_builder,
         result_dir=Path(unit["result_dir"]),

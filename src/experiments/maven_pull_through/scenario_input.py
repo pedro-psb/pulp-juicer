@@ -3,11 +3,13 @@
 import json
 from collections.abc import Mapping
 
-from pulp_juicer import LoadConfig, ServiceFixtureMetadata
+from pulp_juicer import ServiceFixtureMetadata, StepFunctionLoad, UnitaryImpulseLoad
 
 
 def build_pull_through(
-    fixtures: Mapping[str, ServiceFixtureMetadata], candidate: dict, load: LoadConfig
+    fixtures: Mapping[str, ServiceFixtureMetadata],
+    candidate: dict,
+    load: UnitaryImpulseLoad | StepFunctionLoad,
 ) -> dict:
     fixture = fixtures["maven"]
     manifest = json.loads((fixture.output_dir / "manifest.json").read_text())

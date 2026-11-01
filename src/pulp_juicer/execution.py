@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,7 +14,12 @@ from .locust_driver import clean_incomplete_results
 from .locust_driver import run as run_locust
 from .plan import RunMetadata, RunResultMetadata, TestPlanMetadata
 from .sources import resolve_source, source_details, source_environment_name
-from .types import ServiceFixtureMetadata, VolumeFixtureMetadata
+from .types import (
+    ServiceFixtureMetadata,
+    StepFunctionLoad,
+    UnitaryImpulseLoad,
+    VolumeFixtureMetadata,
+)
 
 
 def _compose_inputs(plan: TestPlanMetadata, run: RunMetadata):
@@ -80,14 +86,20 @@ def _write_run_context(
         ],
         "fixture": fixture_info,
         "load": {
+            "profile": type(run.load).__name__,
             "users": run.load.users,
-            "spawn_rate": run.load.spawn_rate_per_second,
+            "spawn_rate": run.load.spawn_rate_per_second
+            if isinstance(run.load, UnitaryImpulseLoad)
+            else None,
             "duration": run.load.max_duration,
             "wait_seconds": run.load.wait_seconds,
             "idle_seconds": run.load.idle_before_seconds,
             "tail_seconds": run.load.tail_after_seconds,
             "request_timeout_seconds": run.load.request_timeout_seconds,
             "request_count": run.load.request_count,
+            "steps": [asdict(step) for step in run.load.steps]
+            if isinstance(run.load, StepFunctionLoad)
+            else [],
         },
         "sources": {
             name: source_details(source, source_paths[name])

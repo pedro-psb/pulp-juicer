@@ -114,9 +114,14 @@ def list_experiments():
 
 
 @cli.command("show")
-@click.argument("experiment_id")
+@click.argument("experiment_id", required=False)
 def show_experiment(experiment_id):
-    """Show an experiment's description, scenarios, candidates, and runs."""
+    """List experiments or show one experiment's full details."""
+    if experiment_id is None:
+        _print_styled(("Available experiments:", "bold magenta"))
+        _list_experiments(include_scenarios=False)
+        click.echo("Use pulp-juicer show EXPERIMENT for details.")
+        return
     registry = experiments()
     if experiment_id not in registry:
         raise click.ClickException(f"Unknown experiment: {experiment_id}")
@@ -137,7 +142,14 @@ def show_experiment(experiment_id):
         )
     _print_styled(("Candidates:", "bold magenta"))
     for candidate in experiment.candidates:
-        _print_styled("  ", (candidate.id, "yellow"), ": ", (candidate.name, "cyan"))
+        _print_styled(
+            "  ",
+            (candidate.id, "yellow"),
+            ": ",
+            (candidate.name, "cyan"),
+            " — ",
+            candidate.description,
+        )
         for name in experiment.required_sources:
             _print_styled(
                 "    ", (name, "green"), ": ", public_source(candidate.sources[name])
@@ -485,8 +497,10 @@ def squeeze(
 ):
     """List available runs, or execute an experiment, scenario, or run."""
     if experiment_id is None:
+        _print_styled(("Available experiments:", "bold magenta"))
         _list_experiments(include_scenarios=False)
-        raise click.UsageError("Missing argument 'EXPERIMENT_ID'.")
+        click.echo("Use pulp-juicer squeeze EXPERIMENT to list available runs.")
+        click.get_current_context().exit(2)
     registry = experiments()
     if experiment_id not in registry:
         raise click.ClickException(f"Unknown experiment: {experiment_id}")

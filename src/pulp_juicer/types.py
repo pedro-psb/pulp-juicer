@@ -76,6 +76,7 @@ class PreTestFunction:
 class CandidateConfig:
     id: int
     name: str
+    description: str
     sources: Mapping[str, str]
     pre_test_functions: list[PreTestFunction]
 
@@ -87,15 +88,64 @@ class RequireFixture:
 
 
 @dataclass(frozen=True)
-class LoadConfig:
+class UnitaryImpulseLoad:
+    request_count: int
+    max_duration: str = "5m"
+    wait_seconds: float = 0
+    idle_before_seconds: float = 5
+    tail_after_seconds: float = 5
+    request_timeout_seconds: float = 60
+
+    def __post_init__(self):
+        if self.request_count < 1:
+            raise ValueError("Impulse request count must be positive")
+
+    @property
+    def users(self) -> int:
+        return self.request_count
+
+    @property
+    def spawn_rate_per_second(self) -> float:
+        return float(self.request_count)
+
+
+@dataclass(frozen=True)
+class LoadStep:
+    at_seconds: float
     users: int
-    spawn_rate_per_second: float
-    max_duration: str
+
+
+@dataclass(frozen=True)
+class StepFunctionLoad:
+    steps: tuple[LoadStep, ...]
+    max_duration: str = "5m"
     wait_seconds: float = 0
     idle_before_seconds: float = 5
     tail_after_seconds: float = 5
     request_timeout_seconds: float = 60
     request_count: int | None = None
+
+    def __post_init__(self):
+        if not self.steps or self.steps[0].at_seconds != 0:
+            raise ValueError("Step function must start at 0 seconds")
+        if any(step.users < 0 for step in self.steps):
+            raise ValueError("Step user counts must be nonnegative")
+        if any(
+            later.at_seconds <= earlier.at_seconds
+            for earlier, later in zip(self.steps, self.steps[1:])
+        ):
+            raise ValueError("Step times must increase")
+
+    @property
+    def users(self) -> int:
+        return max(step.users for step in self.steps)
+
+    @staticmethod
+    def spawn_rate(from_users: int, to_users: int) -> float:
+        return float(max(1, abs(to_users - from_users)))
+
+
+LoadProfile = UnitaryImpulseLoad | StepFunctionLoad
 
 
 @dataclass(frozen=True)
@@ -105,7 +155,7 @@ class ScenarioConfig:
     driver: str
     input: Callable[..., dict]
     run_order: tuple[int, ...]
-    load: LoadConfig
+    load: LoadProfile
     requires: tuple[RequireFixture, ...] = ()
 
 
