@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 13 -->"
+_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 15 -->"
 
 
 def read_csv(path):
@@ -66,6 +66,10 @@ def run_configuration(metadata, history):
         f"| Distribution URL | {markdown_value(metadata['setup']['base_url'])} |",
         f"| Upstream URL | {markdown_value(metadata['upstream_url'])} |",
         f"| Docker Compose project | {markdown_value(metadata['project'])} |",
+        *[
+            f"| Pulp setting {markdown_value(name)} | {markdown_value(value)} |"
+            for name, value in sorted(metadata.get("pulp_settings", {}).items())
+        ],
         f"| Fixture SHA256 | {fixture['manifest_sha256']} |",
         "",
         "#### Software sources",
@@ -102,13 +106,19 @@ def chart(
     overlay=None,
     overlay_label="Completed requests",
     request_starts=None,
+    request_starts_axis="right",
 ):
     if not points:
         return False
     overlay = overlay or []
     request_starts = request_starts or []
     width, height = 900, 360
-    left, right, top, bottom = 86, 95 if overlay or request_starts else 24, 45, 65
+    separate_starts_axis = bool(
+        overlay and request_starts and request_starts_axis == "right"
+    )
+    left = 86
+    right = 170 if separate_starts_axis else 95 if overlay or request_starts else 24
+    top, bottom = 45, 65
     plot_width = width - left - right
     plot_height = height - top - bottom
     x_max = max(
@@ -117,7 +127,11 @@ def chart(
         *(x for x, _ in overlay),
         *(x for x, _ in request_starts),
     )
-    y_max = max(minimum_y, max(y for _, y in points) * 1.1)
+    y_max = max(
+        minimum_y,
+        max(y for _, y in points) * 1.1,
+        *(count * 1.1 for _, count in request_starts if request_starts_axis == "left"),
+    )
 
     def xy(x, y):
         return left + plot_width * x / x_max, top + plot_height * (1 - y / y_max)
@@ -138,48 +152,53 @@ def chart(
         )
 
     right_svg = ""
-    bars_svg = ""
+    starts_svg = ""
     legend = [
         f'<line x1="{left}" y1="22" x2="{left + 24}" y2="22" stroke="{color}" stroke-width="3"/>',
         f'<text x="{left + 32}" y="26">{html.escape(title)}</text>',
     ]
     if overlay or request_starts:
-        right_max = max(
-            1, *(value for _, value in overlay), *(count for _, count in request_starts)
-        )
-        labels = "".join(
-            f'<text x="{width - right + 9}" y="{top + plot_height * (1 - fraction) + 4:.1f}">{right_max * fraction:g}</text>'
-            for fraction in (0, 0.5, 1)
-        )
-        right_svg = (
-            f'<g font-family="sans-serif" font-size="12" fill="#64748b">{labels}</g>'
-        )
-        right_label = overlay_label if overlay else "New requests per second"
-        if overlay and request_starts:
-            right_label += " / new requests per second"
-        right_svg += (
-            f'<line x1="{width - right}" y1="{top}" x2="{width - right}" y2="{height - bottom}" stroke="#94a3b8"/>'
-            f'<text x="{width - 14}" y="{top + plot_height / 2:.1f}" '
-            f'transform="rotate(90 {width - 14} {top + plot_height / 2:.1f})" text-anchor="middle" '
-            f'font-family="sans-serif" font-size="12" fill="#475569">{html.escape(right_label)}</text>'
-        )
+
+        def right_axis(position, scale, label):
+            labels = "".join(
+                f'<text x="{position + 9}" y="{top + plot_height * (1 - fraction) + 4:.1f}">{scale * fraction:g}</text>'
+                for fraction in (0, 0.5, 1)
+            )
+            title_x = position + (55 if separate_starts_axis else 81)
+            return (
+                f'<g font-family="sans-serif" font-size="12" fill="#64748b">{labels}</g>'
+                f'<line x1="{position}" y1="{top}" x2="{position}" y2="{height - bottom}" stroke="#94a3b8"/>'
+                f'<text x="{title_x}" y="{top + plot_height / 2:.1f}" '
+                f'transform="rotate(90 {title_x} {top + plot_height / 2:.1f})" text-anchor="middle" '
+                f'font-family="sans-serif" font-size="12" fill="#475569">{html.escape(label)}</text>'
+            )
+
+        overlay_max = max((1, *(value for _, value in overlay)))
+        starts_max = max((1, *(count for _, count in request_starts)))
+        if overlay:
+            right_svg += right_axis(width - right, overlay_max, overlay_label)
+        elif request_starts_axis == "right":
+            right_svg += right_axis(width - right, starts_max, "New requests/s")
+        if separate_starts_axis:
+            right_svg += right_axis(width - 75, starts_max, "New requests/s")
         if request_starts:
-            bar_width = plot_width / x_max
             legend_x = left + (540 if overlay else 270)
-            bars_svg = "".join(
-                f'<rect x="{xy(x, 0)[0]:.1f}" y="{top + plot_height * (1 - count / right_max):.1f}" '
-                f'width="{bar_width * 0.85:.1f}" height="{plot_height * count / right_max:.1f}" '
-                'fill="#7c3aed" opacity="0.7"/>'
+            starts_scale = y_max if request_starts_axis == "left" else starts_max
+            starts_coordinates = " ".join(
+                f"{left + plot_width * x / x_max:.1f},{top + plot_height * (1 - count / starts_scale):.1f}"
                 for x, count in request_starts
-                if count
+            )
+            starts_svg = (
+                f'<polyline points="{starts_coordinates}" fill="none" stroke="#7c3aed" '
+                'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
             )
             legend += [
-                f'<rect x="{legend_x}" y="16" width="12" height="12" fill="#7c3aed" opacity="0.7"/>',
-                f'<text x="{legend_x + 20}" y="26">New requests per second (right)</text>',
+                f'<line x1="{legend_x}" y1="22" x2="{legend_x + 24}" y2="22" stroke="#7c3aed" stroke-width="2"/>',
+                f'<text x="{legend_x + 32}" y="26">New requests/s ({request_starts_axis})</text>',
             ]
         if overlay:
             load_coordinates = " ".join(
-                f"{left + plot_width * x / x_max:.1f},{top + plot_height * (1 - value / right_max):.1f}"
+                f"{left + plot_width * x / x_max:.1f},{top + plot_height * (1 - value / overlay_max):.1f}"
                 for x, value in overlay
             )
             legend += [
@@ -209,10 +228,10 @@ def chart(
         + "</g>"
         + f'<line x1="{left}" y1="{top}" x2="{left}" y2="{height - bottom}" stroke="#94a3b8"/>'
         + f'<line x1="{left}" y1="{height - bottom}" x2="{width - right}" y2="{height - bottom}" stroke="#94a3b8"/>'
-        + bars_svg
         + f'<polyline points="{coordinates}" fill="none" stroke="{color}" stroke-width="3" '
         'stroke-linecap="round" stroke-linejoin="round"/>'
         + right_svg
+        + starts_svg
         + f'<text x="{left + plot_width / 2:.1f}" y="{height - 9}" text-anchor="middle" '
         'font-family="sans-serif" font-size="12" fill="#475569">Time since recording start (s)</text>'
         + f'<text x="20" y="{top + plot_height / 2:.1f}" '
@@ -288,6 +307,8 @@ def prepare_run(run_dir, results_dir):
     ]
     timeline = ["### Timeline", ""]
     completed_timestamps = []
+    starts = None
+    start = None
 
     if history_path.is_file() and history:
         start = int(history[0]["Timestamp"])
@@ -305,7 +326,6 @@ def prepare_run(run_dir, results_dir):
                 (now, (count - previous_count) / max(1, now - previous_time))
             )
         requests_path = run_dir / "requests.csv"
-        starts = None
         if requests_path.is_file():
             with requests_path.open(newline="") as source:
                 starts = request_starts_per_second(
@@ -329,11 +349,13 @@ def prepare_run(run_dir, results_dir):
             "#e56b35",
             overlay=completed,
             overlay_label="Completed requests",
+            request_starts=starts,
+            request_starts_axis="left",
         )
         caption = "The throughput chart overlays cumulative completed requests. Dashed gray overlays use the right axes. Idle and tail periods remain visible."
         if starts is not None:
             caption = (
-                "Purple bars on the completed-requests chart show new requests per second. "
+                "Purple lines show new requests per second on the completed-requests and throughput charts. "
                 + caption
             )
         timeline += [
@@ -373,6 +395,7 @@ def prepare_run(run_dir, results_dir):
                     for row in cpu
                 ]
                 cpu_completed = []
+                cpu_starts = []
                 if completed_timestamps and cpu[0].get("timestamp_utc"):
                     cpu_start = (
                         datetime.fromisoformat(cpu[0]["timestamp_utc"]).timestamp()
@@ -382,6 +405,12 @@ def prepare_run(run_dir, results_dir):
                         (max(0, timestamp - cpu_start), count)
                         for timestamp, count in completed_timestamps
                     ]
+                    if starts is not None and start is not None:
+                        cpu_starts = [
+                            (start + second - cpu_start, count)
+                            for second, count in starts
+                            if start + second >= cpu_start
+                        ]
                 chart(
                     run_dir / "report_db_cpu.svg",
                     "PostgreSQL CPU",
@@ -391,11 +420,12 @@ def prepare_run(run_dir, results_dir):
                     100,
                     overlay=cpu_completed,
                     overlay_label="Completed requests",
+                    request_starts=cpu_starts,
                 )
                 timeline += ["#### PostgreSQL CPU", ""]
                 if cpu_completed:
                     timeline += [
-                        "The dashed gray curve shows cumulative completed requests (right axis).",
+                        "The dashed gray curve shows cumulative completed requests. The purple line shows new requests per second. Both use their labeled right axes.",
                         "",
                     ]
                 timeline += [f"![PostgreSQL CPU]({asset('report_db_cpu.svg')})", ""]

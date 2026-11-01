@@ -51,6 +51,10 @@ EXPERIMENT = ExperimentConfig(
             id=2,
             name="staging",
             description="Bucket repository implementation with repository staging area concept.",
+            pulp_settings={
+                "STAGING_AUTOCOMMIT_DELAY_SECONDS": 10,
+                "STAGING_AUTOCOMMIT_SCAN_INTERVAL_SECONDS": 5,
+            },
             sources={
                 "pulpcore": "../pulpcore",
                 "pulp_maven": "../pulp_maven",

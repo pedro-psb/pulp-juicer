@@ -11,7 +11,8 @@ The burst scenario runs normal and staging twice. Pulp volumes are reset before 
 
 The experiment requires `pulpcore` and `pulp_maven`; every candidate supplies a source for each.
 A relative source uses the repository root, so `../pulpcore` and `../pulp_maven` select sibling checkouts.
-A Git URL selects a remote ref; the staging candidate uses `pulp/pulp_maven` at tag `0.37.0`.
+A Git URL selects a remote ref; the normal candidate uses `pulp/pulp_maven` at tag `0.37.0`.
+The staging candidate supplies its autocommit delay and scan interval as `pulp_settings`; the normal candidate uses Pulp's defaults.
 Infrastructure resolves each source, installs it, and starts Pulp before invoking candidate setup.
 
 ## Files
@@ -20,7 +21,7 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - Each fixture is an experiment-specific class derived from `ServiceFixture` or `VolumeFixture`.
 - `compose.yaml` defines Pulp; the runner adds fixture service fragments from required fixture metadata.
 - `Containerfile` builds Pulp with the selected pulpcore and plugin source contexts.
-- `settings/settings.py` configures Pulp for this experiment's Compose service.
+- `settings/settings.py` applies shared settings and the selected candidate's `pulp_settings`.
 - `candidates.py` defines one setup function per candidate, used by their `PreTestFunction` records. They configure Maven resources using `pulp_juicer.PulpClient`.
 - `data_service/compose.yaml` defines the upstream HTTP service.
 - `data_service/fixture.py` implements `MavenServiceFixture.build` and `generate_metadata`.

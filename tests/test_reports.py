@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 from click.testing import CliRunner
 
 from pulp_juicer.cli import cli
-from pulp_juicer.report import completed_runs, render_report
+from pulp_juicer.report import completed_runs, prepare_run, render_report
 from pulp_juicer.tasking import TASK_SCHEMA
 from pulp_juicer.trial_report import (
     _mean_sd,
@@ -26,6 +26,47 @@ from pulp_juicer.trial_report import (
 
 
 class TestReportDiscovery(unittest.TestCase):
+    def test_individual_timelines_draw_new_requests_as_lines_on_all_charts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            execution = Path(tmp)
+            run_dir = execution / "burst" / "normal" / "run001"
+            run_dir.mkdir(parents=True)
+            (run_dir / "locust_stats.csv").write_text(
+                "Name,Request Count,Failure Count,Requests/s,Average Response Time,50%,95%,99%\n"
+                "Aggregated,2,0,1,10,9,12,15\n"
+            )
+            (run_dir / "locust_stats_history.csv").write_text(
+                "Name,Timestamp,Total Request Count,User Count\n"
+                "Aggregated,1767225600,0,2\n"
+                "Aggregated,1767225601,2,2\n"
+            )
+            (run_dir / "requests.csv").write_text(
+                "started_at_utc\n2026-01-01T00:00:00+00:00\n2026-01-01T00:00:01+00:00\n"
+            )
+            (run_dir / "db_cpu.csv").write_text(
+                "timestamp_utc,elapsed_s,postgres_cpu_pct\n"
+                "2026-01-01T00:00:00+00:00,0,30\n"
+                "2026-01-01T00:00:01+00:00,1,35\n"
+            )
+            (run_dir / "db_cpu_summary.csv").write_text(
+                "postgres_cpu_mean_pct,postgres_cpu_peak_pct,postgres_cpu_seconds,duration_s,samples\n"
+                "32.5,35,0.65,2,2\n"
+            )
+
+            prepare_run(run_dir, execution)
+            for name in ("completed", "throughput", "db_cpu"):
+                with self.subTest(chart=name):
+                    root = ET.parse(run_dir / f"report_{name}.svg").getroot()
+                    purple_lines = [
+                        node
+                        for node in root.iter("{http://www.w3.org/2000/svg}polyline")
+                        if node.attrib.get("stroke") == "#7c3aed"
+                    ]
+                    self.assertEqual(len(purple_lines), 1)
+                    self.assertNotIn(
+                        "<rect x=", (run_dir / f"report_{name}.svg").read_text()
+                    )
+
     def test_mean_sd_uses_runs_as_observations(self):
         self.assertEqual(_mean_sd([2, 4, 9]), "5.00\u00a0±\u00a03.61")
         self.assertEqual(_mean_sd([4]), "4.00\u00a0±\u00a0N/A")

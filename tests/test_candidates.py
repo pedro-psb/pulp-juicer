@@ -1,14 +1,62 @@
-"""Maven candidate setup payloads for different Pulp versions."""
+"""Maven candidate setup and Pulp settings for different implementations."""
 
+import json
+import os
+import runpy
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from experiments.maven_pull_through.experiment import EXPERIMENT
+from pulp_juicer.execution import _compose_inputs
+from pulp_juicer.plan import build_test_plan
 from pulp_juicer.types import PulpConnection, ServiceFixtureMetadata
 
 
 class TestMavenCandidateSetup(unittest.TestCase):
+    def test_pulp_settings_apply_only_to_selected_candidate(self):
+        compose = (
+            Path(__file__).resolve().parents[1]
+            / "src/experiments/maven_pull_through/compose.yaml"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = build_test_plan(
+                EXPERIMENT,
+                compose,
+                repository_root=Path(tmp),
+                scenario_id="burst",
+            )
+            normal = next(run for run in plan.runs if run.candidate.name == "normal")
+            staging = next(run for run in plan.runs if run.candidate.name == "staging")
+            normal_files, _ = _compose_inputs(plan, normal)
+            staging_files, _ = _compose_inputs(plan, staging)
+            self.assertEqual(len(staging_files), len(normal_files) + 1)
+            override = json.loads(staging_files[-1].read_text())
+            encoded = override["services"]["pulp"]["environment"][
+                "JUICER_PULP_SETTINGS_JSON"
+            ]
+            self.assertEqual(json.loads(encoded), dict(staging.candidate.pulp_settings))
+
+        settings_path = compose.parent / "settings/settings.py"
+        with patch.dict(os.environ, {"PULP_SECRET_KEY": "test"}, clear=True):
+            normal_settings = runpy.run_path(str(settings_path))
+        self.assertNotIn("STAGING_AUTOCOMMIT_DELAY_SECONDS", normal_settings)
+        with patch.dict(
+            os.environ,
+            {"PULP_SECRET_KEY": "test", "JUICER_PULP_SETTINGS_JSON": encoded},
+            clear=True,
+        ):
+            staging_settings = runpy.run_path(str(settings_path))
+        self.assertEqual(
+            staging_settings["STAGING_AUTOCOMMIT_DELAY_SECONDS"],
+            staging.candidate.pulp_settings["STAGING_AUTOCOMMIT_DELAY_SECONDS"],
+        )
+        self.assertEqual(
+            staging_settings["STAGING_AUTOCOMMIT_SCAN_INTERVAL_SECONDS"],
+            staging.candidate.pulp_settings["STAGING_AUTOCOMMIT_SCAN_INTERVAL_SECONDS"],
+        )
+
     def test_repository_fields_match_candidate(self):
         fixture = ServiceFixtureMetadata(
             name="maven",

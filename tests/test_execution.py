@@ -176,6 +176,7 @@ class TestExecution(unittest.TestCase):
             self.assertEqual(metadata["execution_id"], "smoke__small__run001")
             self.assertEqual(metadata["candidate_id"], 1)
             self.assertEqual(metadata["pre_test_functions"], ["Create test resources"])
+            self.assertEqual(metadata["pulp_settings"], {})
             self.assertEqual(metadata["load"]["request_count"], 1)
             self.assertEqual(metadata["load"]["profile"], "UnitaryImpulseLoad")
             self.assertEqual(metadata["load"]["request_timeout_seconds"], 60)

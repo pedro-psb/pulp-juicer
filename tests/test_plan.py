@@ -64,6 +64,15 @@ class TestPlan(unittest.TestCase):
                     restored = load_plan_file(path)
                     self.assertIsInstance(restored.runs[0].load, profile_type)
                     self.assertEqual(restored.runs[0].load, plan.runs[0].load)
+                    for original, loaded in zip(plan.runs, restored.runs):
+                        self.assertEqual(
+                            loaded.candidate.pulp_settings,
+                            original.candidate.pulp_settings,
+                        )
+                    self.assertEqual(
+                        saved["scenarios"][0]["runs"][0]["candidate"]["pulp_settings"],
+                        dict(plan.runs[0].candidate.pulp_settings),
+                    )
 
     def test_expands_run_order_without_building_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +137,9 @@ class TestPlan(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "extra=\\['pulp_python'\\]"):
             replace(EXPERIMENT, candidates=(extra,))
+
+        with self.assertRaisesRegex(ValueError, "Invalid candidate Pulp setting name"):
+            replace(candidate, pulp_settings={"invalid-name": True})
 
 
 class TestCli(unittest.TestCase):

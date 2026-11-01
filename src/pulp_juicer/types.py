@@ -79,6 +79,16 @@ class CandidateConfig:
     description: str
     sources: Mapping[str, str]
     pre_test_functions: list[PreTestFunction]
+    pulp_settings: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        for name in self.pulp_settings:
+            if (
+                not isinstance(name, str)
+                or not name.isidentifier()
+                or not name.isupper()
+            ):
+                raise ValueError(f"Invalid candidate Pulp setting name: {name!r}")
 
 
 @dataclass(frozen=True)

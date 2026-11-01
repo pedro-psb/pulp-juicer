@@ -17,7 +17,7 @@ experiments/* -> ls; show -> available experiments
                               _juice/results/<execution_id>/ + RunResultMetadata
 ```
 
-Each `squeeze` call is an execution, identified by `experiment[__scenario[__run_id]]__NNN` (for example, `maven-pull-through__burst__001`). The final number increases across the workspace. Its plan contains the selected ordered runs; each run records `(experiment, scenario, run_id)` plus candidate, fixture, and load metadata. Each scenario's `run_order` lists candidate IDs, and Pulp is reset before every run. The experiment declares required source names, and each candidate supplies a source for every name. Generated fixtures and results live under `_juice/`.
+Each `squeeze` call is an execution, identified by `experiment[__scenario[__run_id]]__NNN` (for example, `maven-pull-through__burst__001`). The final number increases across the workspace. Its plan contains the selected ordered runs; each run records `(experiment, scenario, run_id)` plus candidate, fixture, and load metadata. Each scenario's `run_order` lists candidate IDs, and Pulp is reset before every run. The experiment declares required source names, and each candidate supplies a source for every name and any candidate-specific Pulp settings. Generated fixtures and results live under `_juice/`.
 
 Scenario load profiles are `UnitaryImpulseLoad` for one request per user or `StepFunctionLoad` for timed changes to the target user count. Both keep request count and timeout settings with the load profile and derive Locust spawn rates internally.
 

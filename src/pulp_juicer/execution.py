@@ -50,6 +50,30 @@ def _compose_inputs(plan: TestPlanMetadata, run: RunMetadata):
             json.dumps({"services": {"pulp": {"volumes": mounts}}}, indent=2) + "\n"
         )
         files.append(override)
+    pulp_settings = getattr(run.candidate, "pulp_settings", {})
+    if pulp_settings:
+        override = (
+            plan.results_dir
+            / "_compose"
+            / f"{run.scenario_id}-candidate-{run.candidate.id}-settings.yaml"
+        )
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(
+            json.dumps(
+                {
+                    "services": {
+                        "pulp": {
+                            "environment": {
+                                "JUICER_PULP_SETTINGS_JSON": json.dumps(pulp_settings)
+                            }
+                        }
+                    }
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        files.append(override)
     return tuple(dict.fromkeys(files)), environment
 
 
@@ -84,6 +108,7 @@ def _write_run_context(
         "pre_test_functions": [
             hook.description for hook in run.candidate.pre_test_functions
         ],
+        "pulp_settings": dict(getattr(run.candidate, "pulp_settings", {})),
         "fixture": fixture_info,
         "load": {
             "profile": type(run.load).__name__,

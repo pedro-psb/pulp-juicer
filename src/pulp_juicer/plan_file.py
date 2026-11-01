@@ -17,7 +17,7 @@ from .types import (
     VolumeFixtureMetadata,
 )
 
-VERSION = 10
+VERSION = 11
 
 
 def _unit(run: RunMetadata) -> dict:
@@ -32,6 +32,7 @@ def _unit(run: RunMetadata) -> dict:
             "name": run.candidate.name,
             "description": run.candidate.description,
             "sources": dict(run.candidate.sources),
+            "pulp_settings": dict(run.candidate.pulp_settings),
             "pre_test_functions": [
                 hook.description for hook in run.candidate.pre_test_functions
             ],
