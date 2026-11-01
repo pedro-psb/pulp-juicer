@@ -52,7 +52,7 @@ The experiment modules do not import Locust.
 
 `build_test_plan` expands this experiment's `run_order` into ordered `RunMetadata` records. Each record identifies a scenario, candidate, and run ID and carries fixture metadata and load settings. Planning does not build fixtures or start services.
 `squeeze` selects an execution: the whole experiment, one scenario, or one run. It builds the selected plan in memory; `--save-plan` also writes JSON. The Python wrapper builds fixtures, starts Pulp, and invokes candidate setup before Locust begins recording; it destroys the services after Locust finishes and closes its measurements. The driver returns `RunResultMetadata` with request counts, failures, latency, and artifact paths.
-Runs and Locust artifacts go under `_juice/results/{execution_id}/{scenario}/{candidate}/{run}`; generated fixtures go under `_juice/fixture/`.
+Runs and Locust artifacts go under `_juice/exeuctions/{execution_id}/{scenario}/{candidate}/{run}`; generated fixtures go under `_juice/fixture/`.
 
 ```bash
 uv run --locked pulp-juicer ls
@@ -60,11 +60,13 @@ uv run --locked pulp-juicer show maven-pull-through
 uv run --locked pulp-juicer squeeze maven-pull-through
 uv run --locked pulp-juicer squeeze maven-pull-through --scenario burst --run-id run001
 uv run --locked --group report pulp-juicer report
-uv run --locked --group report pulp-juicer report --zip
+uv run --locked --group report pulp-juicer report maven-pull-through__burst__001
+uv run --locked --group report pulp-juicer report maven-pull-through__burst__001 --zip
 ```
 
 Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. A bare experiment name lists the available runs.
 Each squeeze gets a new numbered execution ID. Add `-f` to replace the latest execution for the selected scope.
+`report` lists available execution IDs; pass one ID to generate its reports.
 
 
 Run measurements use Parquet (`requests.parquet`, `data_load.parquet`, Locust exports, and `collectors/*.parquet`). Locust’s original CSV exports are retained under `raw/`; report SVGs are stored under `graphs/`. Trial comparison SVGs and phase timings (`timings.parquet`) live in the execution directory.

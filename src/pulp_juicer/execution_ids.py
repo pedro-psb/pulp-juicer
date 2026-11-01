@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 _NUMBERED_EXECUTION = re.compile(r"^.+__(\d{3,})$")
+EXECUTIONS_DIRNAME = "exeuctions"
 
 
 def _existing_ids(workdir: Path) -> set[str]:
@@ -13,7 +14,7 @@ def _existing_ids(workdir: Path) -> set[str]:
         path.name.removeprefix("plan-").removesuffix(".json")
         for path in workdir.glob("plan-*.json")
     }
-    results_dir = workdir / "results"
+    results_dir = workdir / EXECUTIONS_DIRNAME
     if results_dir.is_dir():
         ids.update(path.name for path in results_dir.iterdir() if path.is_dir())
     return {

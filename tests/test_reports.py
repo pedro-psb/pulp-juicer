@@ -274,12 +274,28 @@ class TestReportDiscovery(unittest.TestCase):
                 (directory / "locust_stats.csv").write_text("Name\nAggregated\n")
             self.assertEqual(set(completed_runs(root)), {current})
 
-    def test_report_command_handles_empty_results(self):
+    def test_report_without_id_lists_available_executions(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp) / "results"
             response = CliRunner().invoke(cli, ["report", "--results", str(results)])
-        self.assertEqual(response.exit_code, 0, response.output)
-        self.assertIn("No completed runs found", response.output)
+            self.assertEqual(response.exit_code, 0, response.output)
+            self.assertIn("No executions found", response.output)
+            (results / "maven-pull-through__002").mkdir(parents=True)
+            (results / "maven-pull-through__001").mkdir()
+            (results / "unrelated").mkdir()
+            with patch("pulp_juicer.cli.render_report") as render:
+                listed = CliRunner().invoke(cli, ["report", "--results", str(results)])
+            self.assertEqual(listed.exit_code, 0, listed.output)
+            self.assertEqual(
+                listed.output.splitlines(),
+                [
+                    "Available execution IDs:",
+                    "  maven-pull-through__001",
+                    "  maven-pull-through__002",
+                    "Use pulp-juicer report EXECUTION_ID to generate its reports.",
+                ],
+            )
+            render.assert_not_called()
 
     def test_report_zip_contains_reports_and_source_data_and_reuses_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -381,7 +397,7 @@ class TestReportDiscovery(unittest.TestCase):
             self.assertNotEqual(invalid.exit_code, 0)
             self.assertIn("Invalid execution ID", invalid.output)
 
-    def test_report_command_renders_each_missing_execution_report(self):
+    def test_report_command_renders_selected_execution_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp) / "results"
             first = results / "maven-pull-through__burst__run001__001"
@@ -420,23 +436,23 @@ class TestReportDiscovery(unittest.TestCase):
                     "pulp_juicer.report.subprocess.run", side_effect=fake_quarto
                 ) as render,
             ):
-                response = CliRunner().invoke(
-                    cli, ["report", "--results", str(results)]
-                )
+                responses = [
+                    CliRunner().invoke(
+                        cli, ["report", execution.name, "--results", str(results)]
+                    )
+                    for execution in (first, second, existing)
+                ]
 
-            self.assertEqual(response.exit_code, 0, response.output)
-            self.assertEqual(
-                response.output.splitlines(),
-                [
-                    "New Reports:",
-                    str(first / "report.html"),
-                    str(first / "trials.html"),
-                    str(second / "report.html"),
-                    str(second / "trials.html"),
-                    str(existing / "report.html"),
-                    str(existing / "trials.html"),
-                ],
-            )
+            for execution, response in zip((first, second, existing), responses):
+                self.assertEqual(response.exit_code, 0, response.output)
+                self.assertEqual(
+                    response.output.splitlines(),
+                    [
+                        "New Reports:",
+                        str(execution / "report.html"),
+                        str(execution / "trials.html"),
+                    ],
+                )
             for execution in (first, second):
                 document = (execution / "report.qmd").read_text()
                 self.assertIn(execution.name, document)
@@ -746,7 +762,7 @@ class TestReportDiscovery(unittest.TestCase):
             (execution / "trials.html").write_text("existing trials")
             with patch("pulp_juicer.report.shutil.which") as which:
                 response = CliRunner().invoke(
-                    cli, ["report", "--results", str(results)]
+                    cli, ["report", execution.name, "--results", str(results)]
                 )
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertEqual(

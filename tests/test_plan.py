@@ -78,7 +78,10 @@ class TestPlan(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plan = build_test_plan(
-                EXPERIMENT, COMPOSE, repository_root=root, results_dir=root / "results"
+                EXPERIMENT,
+                COMPOSE,
+                repository_root=root,
+                results_dir=root / "exeuctions",
             )
             self.assertEqual(len(plan.runs), TOTAL_RUNS)
             self.assertEqual(
@@ -96,7 +99,10 @@ class TestPlan(unittest.TestCase):
             self.assertFalse(fixture.output_dir.exists())
             plan.runs[0].result_dir.mkdir(parents=True)
             repeated = build_test_plan(
-                EXPERIMENT, COMPOSE, repository_root=root, results_dir=root / "results"
+                EXPERIMENT,
+                COMPOSE,
+                repository_root=root,
+                results_dir=root / "exeuctions",
             )
             self.assertEqual(
                 [(run.scenario_id, run.run_id) for run in repeated.runs],
@@ -146,7 +152,7 @@ class TestCli(unittest.TestCase):
     def test_results_lists_only_matching_experiment_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
-            results = workdir / "results"
+            results = workdir / "exeuctions"
             current = (
                 results
                 / "maven-pull-through__burst__run001__001"
@@ -290,7 +296,7 @@ class TestCli(unittest.TestCase):
     def test_clean_selected_data_keeps_plan_and_skips_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
-            results = workdir / "results"
+            results = workdir / "exeuctions"
             fixtures = workdir / "fixture"
             results.mkdir(parents=True)
             fixtures.mkdir()
@@ -311,7 +317,7 @@ class TestCli(unittest.TestCase):
     def test_clean_all_removes_data_and_services(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
-            (workdir / "results").mkdir(parents=True)
+            (workdir / "exeuctions").mkdir(parents=True)
             (workdir / "fixture").mkdir()
             with patch(
                 "pulp_juicer.cli.subprocess.run",
@@ -321,7 +327,7 @@ class TestCli(unittest.TestCase):
                     cli, ["clean", "all", "--workdir", str(workdir)]
                 )
             self.assertEqual(response.exit_code, 0, response.output)
-            self.assertFalse((workdir / "results").exists())
+            self.assertFalse((workdir / "exeuctions").exists())
             self.assertFalse((workdir / "fixture").exists())
             self.assertEqual(docker.call_count, 2)
 
@@ -501,7 +507,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(recorded[-1].runs[0].run_id, "run002")
             for plan in recorded:
                 self.assertEqual(
-                    plan.results_dir, workdir / "results" / plan.execution_id
+                    plan.results_dir, workdir / "exeuctions" / plan.execution_id
                 )
                 self.assertTrue(plan.results_dir.is_dir())
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
@@ -566,13 +572,15 @@ class TestCli(unittest.TestCase):
                 for _ in range(2):
                     created = CliRunner().invoke(cli, command)
                     self.assertEqual(created.exit_code, 0, created.output)
-            first_root = workdir / "results" / "maven-pull-through__burst__run001__001"
+            first_root = (
+                workdir / "exeuctions" / "maven-pull-through__burst__run001__001"
+            )
             (first_root / "keep.txt").write_text("keep")
             latest_id = "maven-pull-through__burst__run001__002"
-            result_root = workdir / "results" / latest_id
+            result_root = workdir / "exeuctions" / latest_id
             (result_root / "old.txt").write_text("old")
             other_result = (
-                workdir / "results" / "maven-pull-through__burst__003" / "keep.txt"
+                workdir / "exeuctions" / "maven-pull-through__burst__003" / "keep.txt"
             )
             other_result.parent.mkdir(parents=True)
             other_result.write_text("keep")
@@ -641,10 +649,10 @@ class TestCli(unittest.TestCase):
                 failed = CliRunner().invoke(cli, command)
             self.assertNotEqual(failed.exit_code, 0)
             execution_id = "maven-pull-through__burst__run001__001"
-            self.assertTrue((workdir / "results" / execution_id).is_dir())
+            self.assertTrue((workdir / "exeuctions" / execution_id).is_dir())
             compose_log = (
                 workdir
-                / "results"
+                / "exeuctions"
                 / execution_id
                 / "burst"
                 / "normal"
@@ -654,7 +662,7 @@ class TestCli(unittest.TestCase):
             self.assertIn(f"Compose log: {compose_log}", failed.output)
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
             log_text = (
-                workdir / "results" / execution_id / "execution.log"
+                workdir / "exeuctions" / execution_id / "execution.log"
             ).read_text()
             self.assertIn("Execution failed", log_text)
             self.assertIn("RuntimeError: failed", log_text)
@@ -703,7 +711,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertIn("10/10 requests, 2 failures", response.output)
             self.assertIn(
-                f"Compose log: {workdir / 'results' / 'maven-pull-through__burst__run001__001' / 'burst' / 'normal' / 'run001' / 'compose.log'}",
+                f"Compose log: {workdir / 'exeuctions' / 'maven-pull-through__burst__run001__001' / 'burst' / 'normal' / 'run001' / 'compose.log'}",
                 response.output,
             )
             self.assertIn("Results:", response.output)
@@ -748,7 +756,7 @@ class TestCli(unittest.TestCase):
             self.assertNotEqual(response.exit_code, 0)
             compose_log = (
                 workdir
-                / "results"
+                / "exeuctions"
                 / "maven-pull-through__burst__run001__001"
                 / "burst"
                 / "normal"
@@ -784,7 +792,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(response.exit_code, 0, response.output)
             log_path = (
                 workdir
-                / "results"
+                / "exeuctions"
                 / "maven-pull-through__burst__run001__001"
                 / "execution.log"
             )

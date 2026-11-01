@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .execution_ids import EXECUTIONS_DIRNAME
 from .types import (
     CandidateConfig,
     ExperimentConfig,
@@ -154,7 +155,7 @@ def build_test_plan(
     )
     workdir = resolve_workdir(compose_file, workdir, root)
     if results_dir is None:
-        results_dir = workdir / "results"
+        results_dir = workdir / EXECUTIONS_DIRNAME
         if execution_id is not None:
             results_dir /= execution_id
     else:

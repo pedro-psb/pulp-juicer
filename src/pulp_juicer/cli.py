@@ -18,7 +18,7 @@ from .archive import archive_execution
 from .catalog import experiments
 from .compose_runtime import ComposeRuntime
 from .execution import execute_test_plan
-from .execution_ids import latest_execution_id, next_execution_id
+from .execution_ids import EXECUTIONS_DIRNAME, latest_execution_id, next_execution_id
 from .execution_log import ExecutionLog
 from .plan import build_test_plan, execution_scope, resolve_workdir
 from .plan_file import write_plan_file
@@ -169,7 +169,7 @@ def show_experiment(experiment_id):
     "--results",
     "results_dir",
     type=click.Path(path_type=Path),
-    default=Path("_juice/results"),
+    default=Path("_juice") / EXECUTIONS_DIRNAME,
     show_default=True,
 )
 @click.option(
@@ -182,27 +182,45 @@ def show_experiment(experiment_id):
     help="Archive reports and source data per execution.",
 )
 def report_results(execution_id, results_dir, quarto_command, zip_reports):
-    """Render one execution's reports, or all executions when omitted."""
+    """List execution IDs, or render the reports for one execution."""
     from pyarrow import ArrowException
+
+    if execution_id is None:
+        if zip_reports:
+            raise click.UsageError("--zip requires EXECUTION_ID")
+        executions = (
+            sorted(
+                path.name
+                for path in results_dir.iterdir()
+                if path.is_dir() and re.fullmatch(r".+__\d{3,}", path.name)
+            )
+            if results_dir.is_dir()
+            else []
+        )
+        if not executions:
+            click.echo(f"No executions found under {results_dir}")
+            return
+        _print_styled(("Available execution IDs:", "bold magenta"))
+        for name in executions:
+            _print_styled("  ", (name, "cyan"))
+        click.echo("Use pulp-juicer report EXECUTION_ID to generate its reports.")
+        return
 
     new_reports = []
     existing_reports = []
     new_archives = []
     existing_archives = []
     try:
-        if execution_id is not None:
-            if Path(execution_id).name != execution_id or not re.fullmatch(
-                r".+__\d{3,}", execution_id
-            ):
-                raise click.ClickException(f"Invalid execution ID: {execution_id}")
-            selected = results_dir / execution_id
-            if not selected.is_dir():
-                raise click.ClickException(
-                    f"Execution not found: {execution_id} under {results_dir}"
-                )
-            executions = [selected]
-        else:
-            executions = sorted(results_dir.iterdir()) if results_dir.is_dir() else []
+        if Path(execution_id).name != execution_id or not re.fullmatch(
+            r".+__\d{3,}", execution_id
+        ):
+            raise click.ClickException(f"Invalid execution ID: {execution_id}")
+        selected = results_dir / execution_id
+        if not selected.is_dir():
+            raise click.ClickException(
+                f"Execution not found: {execution_id} under {results_dir}"
+            )
+        executions = [selected]
         for execution_dir in executions:
             if not execution_dir.is_dir() or not re.fullmatch(
                 r".+__\d{3,}", execution_dir.name
@@ -273,7 +291,7 @@ def list_results(experiment_id, workdir):
     if experiment_id not in registry:
         raise click.ClickException(f"Unknown experiment: {experiment_id}")
     _, compose_file = registry[experiment_id]
-    results_dir = resolve_workdir(compose_file, workdir) / "results"
+    results_dir = resolve_workdir(compose_file, workdir) / EXECUTIONS_DIRNAME
     found = False
     for metadata_file in sorted(results_dir.glob("*/*/*/*/run_metadata.json")):
         try:
@@ -497,7 +515,10 @@ def clean(targets, workdir, docker_command):
         )
 
     if selected & {"results", "fixtures"}:
-        for target, directory in (("results", "results"), ("fixtures", "fixture")):
+        for target, directory in (
+            ("results", EXECUTIONS_DIRNAME),
+            ("fixtures", "fixture"),
+        ):
             if target in selected:
                 path = root / directory
                 removed = _remove_output_dir(path)
