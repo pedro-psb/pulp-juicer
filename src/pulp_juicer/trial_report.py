@@ -19,7 +19,7 @@ from .tasking import task_metrics, wait_distribution_chart
 
 _COLORS = ("#2563eb", "#e56b35", "#16a34a", "#a855f7", "#dc2626", "#0891b2")
 _DASHES = ("", "8 4", "3 3", "11 4 3 4")
-_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 10 -->"
+_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 13 -->"
 _METRICS = (
     ("completed", "Cumulative completed requests", "Completed requests (count)"),
     ("throughput", "Completed requests per second", "Completed requests/s"),
@@ -309,9 +309,11 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
             )
     lines += [
         "",
-        "#### Longest execution by task type",
+        "#### Total execution time by task type",
         "",
-        "| Candidate | Task type | Max execution (ms) |",
+        "Totals sum the reported execution time of all instances across the listed runs.",
+        "",
+        "| Candidate | Task type | Total execution (ms) |",
         "|:--|:--|--:|",
     ]
     for candidate in sorted(groups):
@@ -324,12 +326,12 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
                     if row["execution_time_us"] is not None
                 ]
                 if durations:
-                    types.append((task_type, max(durations)))
-        for task_type, maximum in sorted(types, key=lambda item: (-item[1], item[0]))[
+                    types.append((task_type, sum(durations)))
+        for task_type, total in sorted(types, key=lambda item: (-item[1], item[0]))[
             :10
         ]:
             lines.append(
-                f"| {markdown_value(candidate)} | {markdown_value(task_type)} | {_format(maximum, 2)} |"
+                f"| {markdown_value(candidate)} | {markdown_value(task_type)} | {_format(total, 2)} |"
             )
     lines.append("")
     traces = [
@@ -445,6 +447,100 @@ def _chart(path: Path, label: str, traces: list[tuple[str, str, str, list]]):
         "</svg>",
     ]
     path.write_text("\n".join(items) + "\n")
+
+
+def _task_gantt(path: Path, trials: list[Trial]) -> int | None:
+    """Draw observed task durations from the logged start and finish times."""
+    bars = []
+    for trial in trials:
+        tasks = trial.tasks or []
+        starts = [row["started_at_utc"] for row in tasks if row["started_at_utc"]]
+        if not starts:
+            continue
+        saved_start = (trial.metadata or {}).get("result", {}).get("load_start_utc")
+        origin = datetime.fromisoformat(saved_start) if saved_start else min(starts)
+        for row in tasks:
+            start = row["started_at_utc"]
+            finish = row["finished_at_utc"]
+            if (
+                start is None
+                or finish is None
+                or finish < start
+                or row["status"] not in {"completed", "failed"}
+            ):
+                continue
+            bars.append(
+                (
+                    trial.run_id,
+                    row["task_type"] or "Unknown",
+                    row["task_id"],
+                    row["status"],
+                    (start - origin).total_seconds(),
+                    (finish - origin).total_seconds(),
+                )
+            )
+    if not bars:
+        return None
+    bars.sort(key=lambda bar: (bar[0], bar[4], bar[1], bar[2]))
+    left, right = max(320, 28 + 7 * max(len(bar[1]) for bar in bars)), 30
+    width = left + 750 + right
+    top, row_height, run_height = 58, 18, 24
+    bottom = top + len(bars) * row_height + len({bar[0] for bar in bars}) * run_height
+    height = bottom + 65
+    first = min(0, *(bar[4] for bar in bars))
+    last = max(1, *(bar[5] for bar in bars))
+    plot_width = width - left - right
+
+    def x(second):
+        return left + (second - first) * plot_width / (last - first)
+
+    items = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Task duration Gantt chart">',
+        '<rect width="100%" height="100%" fill="#fff"/>',
+    ]
+    for index in range(5):
+        second = first + (last - first) * index / 4
+        position = x(second)
+        items += [
+            f'<line x1="{position:.1f}" y1="{top}" x2="{position:.1f}" y2="{bottom}" stroke="#e5e7eb"/>',
+            f'<text x="{position:.1f}" y="{bottom + 20}" text-anchor="middle">{second:.1f}</text>',
+        ]
+    y = top
+    previous_run = None
+    for run, task_type, task_id, status, start, finish in bars:
+        if run != previous_run:
+            items += [
+                f'<rect x="64" y="{y}" width="{width - right - 64}" height="{run_height}" fill="#f1f5f9"/>',
+                f'<text x="72" y="{y + 16}" font-size="12" font-weight="bold">{html.escape(run)}</text>',
+            ]
+            y += run_height
+            previous_run = run
+        color = "#2563eb" if status == "completed" else "#dc2626"
+        duration = finish - start
+        x_start = x(start)
+        bar_width = max(2, x(finish) - x_start)
+        safe_run = html.escape(run, quote=True)
+        safe_task_id = html.escape(task_id, quote=True)
+        items += [
+            f'<text x="{left - 8}" y="{y + 13}" text-anchor="end" font-size="11">{html.escape(task_type)}</text>',
+            f'<rect x="{x_start:.1f}" y="{y + 3}" width="{bar_width:.1f}" height="12" fill="{color}" data-run="{safe_run}" data-task-id="{safe_task_id}" data-start-s="{start:.3f}" data-duration-s="{duration:.3f}">',
+            f"<title>{html.escape(task_type)}: {duration:.3f} s ({status})</title>",
+            "</rect>",
+        ]
+        y += row_height
+    items += [
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#94a3b8"/>',
+        f'<line x1="{left}" y1="{bottom}" x2="{width - right}" y2="{bottom}" stroke="#94a3b8"/>',
+        f'<text x="{width / 2}" y="{bottom + 45}" text-anchor="middle">Time from run origin (s)</text>',
+        f'<text x="18" y="{(top + bottom) / 2}" transform="rotate(-90 18 {(top + bottom) / 2})" text-anchor="middle">Task instances</text>',
+        f'<rect x="{left}" y="22" width="12" height="12" fill="#2563eb"/>',
+        f'<text x="{left + 20}" y="33">Completed</text>',
+        f'<rect x="{left + 130}" y="22" width="12" height="12" fill="#dc2626"/>',
+        f'<text x="{left + 150}" y="33">Failed</text>',
+        "</svg>",
+    ]
+    path.write_text("\n".join(items) + "\n")
+    return width
 
 
 def _scenario_sections(execution_dir, scenario, trials, colors):
@@ -567,6 +663,29 @@ def _scenario_sections(execution_dir, scenario, trials, colors):
             graphs += [f"#### {title}", "", f"![{title}]({name})", ""]
     if not any(trial.series for trial in trials):
         graphs += ["No request timelines available.", ""]
+    gantt = []
+    safe_scenario = re.sub(r"[^A-Za-z0-9_-]+", "_", scenario)
+    for candidate in names:
+        safe_candidate = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate)
+        name = f"trials_{safe_scenario}_{safe_candidate}_task_gantt.svg"
+        gantt_width = _task_gantt(execution_dir / name, groups[candidate])
+        if gantt_width:
+            gantt += [
+                f"#### {markdown_value(candidate)}",
+                "",
+                '::: {style="max-height: 720px; overflow: auto;"}',
+                f"![Task duration Gantt chart]({name}){{width={gantt_width}}}",
+                ":::",
+                "",
+            ]
+    if gantt:
+        graphs += [
+            "### Task durations by candidate",
+            "",
+            "Each bar spans a logged task start and finish. Time zero is the recorded load start, or the first task start when unavailable. Tasks missing either timestamp are omitted. Colors show completion or failure.",
+            "",
+            *gantt,
+        ]
     return lines, graphs
 
 

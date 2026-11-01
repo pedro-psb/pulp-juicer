@@ -15,8 +15,8 @@ def setup_maven(
     fixture: ServiceFixtureMetadata,
     run_id: str,
     *,
-    staging_enabled: bool,
-    staging_autocommit: bool,
+    staging_enabled: bool = False,
+    staging_autocommit: bool = False,
 ) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
         raise ValueError(
@@ -30,14 +30,16 @@ def setup_maven(
             {"name": f"{name}-remote", "url": fixture.url.rstrip("/") + "/"},
         )
     )["pulp_href"]
+    repository_payload = {"name": name}
+    if staging_enabled:
+        repository_payload.update(
+            staging_enabled=True,
+            staging_autocommit=staging_autocommit,
+        )
     repository = client.wait_for_created_resource(
         client.post(
             "/pulp/api/v3/repositories/maven/maven/",
-            {
-                "name": name,
-                "staging_enabled": staging_enabled,
-                "staging_autocommit": staging_autocommit,
-            },
+            repository_payload,
         )
     )["pulp_href"]
     distribution = client.wait_for_created_resource(
@@ -70,8 +72,6 @@ class NormalCandidate(CandidateConfig):
             connection,
             fixtures["maven"],
             run_id,
-            staging_enabled=False,
-            staging_autocommit=False,
         )
 
 

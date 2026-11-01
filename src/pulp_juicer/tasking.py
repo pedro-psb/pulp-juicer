@@ -492,13 +492,13 @@ def task_report_sections(
     for row in rows:
         grouped[row["task_type"] or "Unknown"].append(row)
 
-    def summary(task_type, group):
+    def summary(task_type, group, *, total=False):
         times = [
             row["execution_time_us"] / 1000
             for row in group
             if row["execution_time_us"] is not None
         ]
-        duration = f"{max(times):,.2f}" if times else "N/A"
+        duration = f"{sum(times) if total else max(times):,.2f}" if times else "N/A"
         return (
             f"| {html.escape(task_type).replace('|', '&#124;')} | {len(group)} | "
             f"{sum(row['status'] == 'completed' for row in group)} | "
@@ -514,15 +514,23 @@ def task_report_sections(
         grouped.items(), key=lambda item: (-len(item[1]), item[0])
     )[:10]:
         lines.append(summary(task_type, group))
-    lines += ["", "##### Longest execution by task type", "", *header]
-    longest = sorted(
+    lines += [
+        "",
+        "##### Total execution time by task type",
+        "",
+        "Totals sum the reported execution time of all instances of each task type.",
+        "",
+        "| Task type | Tasks | Completed | Failed | Total execution (ms) |",
+        "|:--|--:|--:|--:|--:|",
+    ]
+    by_total = sorted(
         (
             (task_type, group)
             for task_type, group in grouped.items()
             if any(row["execution_time_us"] is not None for row in group)
         ),
         key=lambda item: (
-            -max(
+            -sum(
                 row["execution_time_us"]
                 for row in item[1]
                 if row["execution_time_us"] is not None
@@ -530,9 +538,9 @@ def task_report_sections(
             item[0],
         ),
     )
-    for task_type, group in longest[:10]:
-        lines.append(summary(task_type, group))
-    if not longest:
+    for task_type, group in by_total[:10]:
+        lines.append(summary(task_type, group, total=True))
+    if not by_total:
         lines.append("No completed task durations were reported.")
     lines.append("")
 

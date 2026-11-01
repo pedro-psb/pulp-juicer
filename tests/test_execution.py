@@ -19,6 +19,82 @@ from pulp_juicer.types import (
 
 
 class TestExecution(unittest.TestCase):
+    def test_post_debug_keeps_services_after_success_or_test_failure(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                output = root / "run001"
+                candidate = SimpleNamespace(
+                    name="normal",
+                    sources={},
+                    setup=Mock(return_value={"base_url": "http://example.test/"}),
+                )
+                run = SimpleNamespace(
+                    result_dir=output,
+                    scenario_id="small",
+                    run_id="run001",
+                    candidate=candidate,
+                    fixtures={},
+                    fixture_builds=(),
+                    load=SimpleNamespace(),
+                    input_builder=Mock(return_value={"requests": [{"path": "a"}]}),
+                )
+                plan = SimpleNamespace(
+                    execution_id="smoke__small__run001__001",
+                    runs=(run,),
+                    experiment=SimpleNamespace(required_sources=()),
+                    repository_root=root,
+                    results_dir=root,
+                    pulp_connection=PulpConnection(),
+                    compose_command=("docker", "compose"),
+                    compose_file=root / "pulp.yaml",
+                )
+
+                def fake_locust(
+                    run, start, stop, *, output=output, fail=fail, **kwargs
+                ):
+                    output.mkdir()
+                    start()
+                    stop()
+                    if fail:
+                        raise RuntimeError("load failed")
+                    return SimpleNamespace(
+                        timed_out=False,
+                        completed_requests=1,
+                        expected_requests=1,
+                        failures=0,
+                        result_dir=output,
+                        scenario_id="small",
+                        run_id="run001",
+                        candidate_name="normal",
+                    )
+
+                with (
+                    patch("pulp_juicer.execution.ComposeRuntime") as runtime_type,
+                    patch("pulp_juicer.execution.PulpClient.get", return_value={}),
+                    patch("pulp_juicer.execution.run_locust", side_effect=fake_locust),
+                    patch("pulp_juicer.execution._write_run_context"),
+                ):
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, "load failed"):
+                            execute_test_plan(plan, post_debug=True)
+                    else:
+                        self.assertEqual(
+                            len(execute_test_plan(plan, post_debug=True)), 1
+                        )
+                runtime = runtime_type.return_value
+                runtime.ensure.assert_called_once()
+                runtime.dump_logs.assert_called_once()
+                runtime.close.assert_not_called()
+
+    def test_post_debug_rejects_multiple_runs_before_service_work(self):
+        with (
+            patch("pulp_juicer.execution.ComposeRuntime") as runtime_type,
+            self.assertRaisesRegex(ValueError, "exactly one run"),
+        ):
+            execute_test_plan(SimpleNamespace(runs=(1, 2)), post_debug=True)
+        runtime_type.assert_not_called()
+
     def test_run_metadata_contains_configuration_setup_and_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

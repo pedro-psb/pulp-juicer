@@ -44,7 +44,8 @@ def resolve_source(
 ) -> Path:
     repository, separator, ref = source.partition("#")
     path = Path(repository).expanduser()
-    if not repository.startswith(("https://", "http://", "ssh://", "git@", "file://")):
+    remote = repository.startswith(("https://", "http://", "ssh://", "git@", "file://"))
+    if not remote:
         if not path.is_absolute():
             path = repository_root / path
         if not path.is_dir():
@@ -57,22 +58,23 @@ def resolve_source(
     destination = results_dir / "_sources" / name / key
     destination.parent.mkdir(parents=True, exist_ok=True)
     git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"}
+    depth = ["--depth", "1"] if remote else []
     if not (destination / ".git").exists():
         subprocess.run(
-            ["git", "clone", "--no-checkout", repository, str(destination)],
+            ["git", "clone", "--no-checkout", *depth, repository, str(destination)],
             check=True,
             env=git_env,
         )
     if separator:
         subprocess.run(
-            ["git", "-C", str(destination), "fetch", "origin", ref],
+            ["git", "-C", str(destination), "fetch", *depth, "origin", ref],
             check=True,
             env=git_env,
         )
         checkout = "FETCH_HEAD"
     else:
         subprocess.run(
-            ["git", "-C", str(destination), "fetch", "origin"],
+            ["git", "-C", str(destination), "fetch", *depth, "origin"],
             check=True,
             env=git_env,
         )

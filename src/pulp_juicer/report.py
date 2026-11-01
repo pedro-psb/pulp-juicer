@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 9 -->"
+_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 10 -->"
 
 
 def read_csv(path):

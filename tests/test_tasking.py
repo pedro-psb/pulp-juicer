@@ -166,7 +166,12 @@ class TestTasking(unittest.TestCase):
             self.assertIn("| Completed without start record | 1 |", source)
             self.assertIn("| maven.pull | 2 | 2 | 0 | 230.00 |", source)
             self.assertIn("| core.cleanup | 1 | 0 | 1 | N/A |", source)
-            self.assertIn("Longest execution by task type", source)
+            self.assertIn("Total execution time by task type", source)
+            self.assertIn(
+                "| Task type | Tasks | Completed | Failed | Total execution (ms) |",
+                source,
+            )
+            self.assertIn("| maven.pull | 2 | 2 | 0 | 280.00 |", source)
             self.assertNotIn("report_tasks.svg", source)
             self.assertIn("report_tasks.svg", "\n".join(timeline))
             ET.parse(run_dir / "report_tasks.svg")
@@ -238,7 +243,7 @@ class TestTasking(unittest.TestCase):
                 source_path = execution / "report.qmd"
                 source_path.write_text(
                     source_path.read_text().replace(
-                        "<!-- pulp-juicer-report-layout: 9 -->", ""
+                        "<!-- pulp-juicer-report-layout: 10 -->", ""
                     )
                 )
                 third = CliRunner().invoke(
@@ -254,10 +259,10 @@ class TestTasking(unittest.TestCase):
             self.assertIn(f"Existing:\n{execution / 'report.html'}", second.output)
             self.assertTrue((run_dir / "tasking.parquet").is_file())
             report_source = (execution / "report.qmd").read_text()
-            self.assertIn("<!-- pulp-juicer-report-layout: 9 -->", report_source)
+            self.assertIn("<!-- pulp-juicer-report-layout: 10 -->", report_source)
             self.assertIn("#### Pulp tasks", report_source)
             self.assertIn("Most frequent task types", report_source)
-            self.assertIn("Longest execution by task type", report_source)
+            self.assertIn("Total execution time by task type", report_source)
             self.assertIn("report_tasks.svg", report_source)
             self.assertIn("report_task_wait.svg", report_source)
             self.assertIn("tasking.parquet", report_source)
@@ -269,7 +274,7 @@ class TestTasking(unittest.TestCase):
                 report_source.index("# Run configuration and source files"),
             )
             self.assertLess(
-                report_source.index("##### Longest execution by task type"),
+                report_source.index("##### Total execution time by task type"),
                 report_source.index("# Graphs"),
             )
             self.assertGreater(

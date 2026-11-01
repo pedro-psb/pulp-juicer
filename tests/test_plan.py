@@ -289,7 +289,13 @@ class TestCli(unittest.TestCase):
         self.assertEqual(listed.exit_code, 0, listed.output)
         run_without_experiment = runner.invoke(cli, ["squeeze"])
         self.assertEqual(run_without_experiment.exit_code, 2)
-        self.assertIn(listed.output, run_without_experiment.output)
+        self.assertIn(
+            "maven-pull-through: Compare Maven pull-through candidates under two load patterns.",
+            run_without_experiment.output,
+        )
+        self.assertNotIn("  burst:", run_without_experiment.output)
+        self.assertNotIn("  calibrate:", run_without_experiment.output)
+        self.assertNotIn("run001", run_without_experiment.output)
         self.assertIn("Usage:", run_without_experiment.output)
         self.assertIn("Missing argument 'EXPERIMENT_ID'", run_without_experiment.output)
         self.assertIn(
@@ -713,6 +719,65 @@ class TestCli(unittest.TestCase):
                 response = CliRunner().invoke(cli, [*command, *scope])
                 self.assertNotEqual(response.exit_code, 0)
             self.assertEqual(list((Path(tmp) / "_juice").glob("plan-*.json")), [])
+
+    def test_post_debug_requires_single_run_and_prints_inspection_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "_juice"
+            command = [
+                "squeeze",
+                "maven-pull-through",
+                "--workdir",
+                str(workdir),
+                "--post-debug",
+            ]
+            for scope in ([], ["--all"], ["--scenario", "burst"]):
+                response = CliRunner().invoke(cli, [*command, *scope])
+                self.assertNotEqual(response.exit_code, 0)
+                self.assertIn(
+                    "--post-debug requires --scenario and --run-id", response.output
+                )
+            self.assertFalse(workdir.exists())
+
+            with patch("pulp_juicer.cli.execute_test_plan", return_value=()) as execute:
+                response = CliRunner().invoke(
+                    cli,
+                    [*command, "--scenario", "burst", "--run-id", "run001"],
+                    env={"COMPOSE": "docker compose"},
+                )
+            self.assertEqual(response.exit_code, 0, response.output)
+            self.assertTrue(execute.call_args.kwargs["post_debug"])
+            self.assertEqual(len(execute.call_args.args[0].runs), 1)
+            self.assertIn("Post-debug: services are still running", response.output)
+            self.assertIn(
+                "export COMPOSE_PROJECT_NAME=pulp-juicer-maven-pull-through",
+                response.output,
+            )
+            self.assertIn(f"export COMPOSE_FILE={COMPOSE}", response.output)
+            self.assertIn("docker compose ps", response.output)
+            self.assertIn("docker compose exec pulp sh", response.output)
+            self.assertIn("docker compose logs --follow pulp", response.output)
+            self.assertIn(
+                "curl --user admin http://127.0.0.1:5001/pulp/api/v3/status/",
+                response.output,
+            )
+            self.assertIn("docker compose down --remove-orphans", response.output)
+            self.assertNotIn("--project-name", response.output)
+            self.assertNotIn("--file", response.output)
+
+            with patch(
+                "pulp_juicer.cli.execute_test_plan",
+                side_effect=RuntimeError("load failed"),
+            ):
+                failed = CliRunner().invoke(
+                    cli,
+                    [*command, "--scenario", "burst", "--run-id", "run001"],
+                    env={"COMPOSE": "docker compose"},
+                )
+            self.assertNotEqual(failed.exit_code, 0)
+            self.assertIn(
+                "Post-debug commands (services may be running)", failed.output
+            )
+            self.assertIn("exec pulp sh", failed.output)
 
 
 if __name__ == "__main__":

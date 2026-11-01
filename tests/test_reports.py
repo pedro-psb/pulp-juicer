@@ -5,6 +5,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -14,10 +15,59 @@ from click.testing import CliRunner
 from pulp_juicer.cli import cli
 from pulp_juicer.report import completed_runs, render_report
 from pulp_juicer.tasking import TASK_SCHEMA
-from pulp_juicer.trial_report import render_trial_report
+from pulp_juicer.trial_report import _task_gantt, render_trial_report
 
 
 class TestReportDiscovery(unittest.TestCase):
+    def test_task_gantt_uses_logged_duration_and_skips_partial_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gantt.svg"
+            start = datetime(2026, 1, 1, tzinfo=UTC)
+            trial = SimpleNamespace(
+                run_id="run001",
+                metadata={"result": {"load_start_utc": start.isoformat()}},
+                tasks=[
+                    {
+                        "task_id": "completed-id",
+                        "task_type": "maven.pull.with.a.full.long.task.name",
+                        "status": "completed",
+                        "started_at_utc": start + timedelta(seconds=1),
+                        "finished_at_utc": start + timedelta(seconds=3),
+                    },
+                    {
+                        "task_id": "failed-id",
+                        "task_type": "maven.pull",
+                        "status": "failed",
+                        "started_at_utc": start + timedelta(seconds=2),
+                        "finished_at_utc": start + timedelta(seconds=4),
+                    },
+                    {
+                        "task_id": "unfinished-id",
+                        "task_type": "maven.pull",
+                        "status": "started",
+                        "started_at_utc": start,
+                        "finished_at_utc": None,
+                    },
+                ],
+            )
+            self.assertTrue(_task_gantt(path, [trial]))
+            root = ET.parse(path).getroot()
+            bars = {
+                bar.attrib["data-task-id"]: bar
+                for bar in root.iter("{http://www.w3.org/2000/svg}rect")
+                if "data-task-id" in bar.attrib
+            }
+            self.assertEqual(set(bars), {"completed-id", "failed-id"})
+            self.assertEqual(bars["completed-id"].attrib["data-start-s"], "1.000")
+            self.assertEqual(bars["completed-id"].attrib["data-duration-s"], "2.000")
+            self.assertEqual(bars["failed-id"].attrib["fill"], "#dc2626")
+            labels = [
+                node.text for node in root.iter("{http://www.w3.org/2000/svg}text")
+            ]
+            self.assertIn("maven.pull.with.a.full.long.task.name", labels)
+            self.assertEqual(labels.count("run001"), 1)
+            self.assertNotIn("completed-id", labels)
+
     def test_old_generated_report_without_task_data_refreshes_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
             execution = Path(tmp) / "smoke__001"
@@ -166,7 +216,7 @@ class TestReportDiscovery(unittest.TestCase):
                 (run_dir / "db_cpu_summary.csv").write_text(
                     f"postgres_cpu_mean_pct\n{cpu}\n"
                 )
-                if scenario == "burst" and run_id in ("run001", "run002"):
+                if scenario == "burst" and run_id in ("run001", "run002", "run003"):
                     start = datetime(2026, 1, 1, tzinfo=UTC)
                     pq.write_table(
                         pa.Table.from_pylist(
@@ -186,7 +236,23 @@ class TestReportDiscovery(unittest.TestCase):
                                     "waiting_time_us": 100000
                                     if run_id == "run001"
                                     else 200000,
-                                }
+                                },
+                                *(
+                                    [
+                                        {
+                                            "task_id": f"{run_id}-extra",
+                                            "task_type": "maven.pull",
+                                            "status": "completed",
+                                            "worker": "worker-1",
+                                            "started_at_utc": start,
+                                            "finished_at_utc": start
+                                            + timedelta(seconds=1),
+                                            "execution_time_us": 50000,
+                                        }
+                                    ]
+                                    if run_id == "run002"
+                                    else []
+                                ),
                             ],
                             schema=TASK_SCHEMA,
                         ),
@@ -228,15 +294,17 @@ class TestReportDiscovery(unittest.TestCase):
                 "normal / run001: 1 of 1 tasks have wait data", wait_svg.read_text()
             )
             self.assertIn(
-                "staging / run002: 1 of 1 tasks have wait data", wait_svg.read_text()
+                "staging / run002: 1 of 2 tasks have wait data", wait_svg.read_text()
             )
             self.assertIn("Tasks with wait data (count)", wait_svg.read_text())
             self.assertIn("Dispatch-to-start wait (ms)", wait_svg.read_text())
             self.assertNotIn("<polyline", wait_svg.read_text())
             self.assertNotIn("No terminal record", source)
-            self.assertIn("| normal | maven.pull | 1 | 1 | 0 | 230.00 |", source)
+            self.assertIn("| normal | maven.pull | 2 | 2 | 0 | 230.00 |", source)
+            self.assertIn("| Candidate | Task type | Total execution (ms) |", source)
+            self.assertIn("| staging | maven.pull | 280.00 |", source)
             self.assertLess(
-                source.index("#### Longest execution by task type"),
+                source.index("#### Total execution time by task type"),
                 source.index("# Graphs"),
             )
             self.assertLess(
@@ -269,6 +337,29 @@ class TestReportDiscovery(unittest.TestCase):
                     svg.read_text(),
                 )
             self.assertIn("Time since load start (s)", svg.read_text())
+            for candidate, count in (("normal", 2), ("staging", 2)):
+                gantt_name = f"trials_burst_{candidate}_task_gantt.svg"
+                self.assertIn(gantt_name, source)
+                self.assertGreater(source.index(gantt_name), source.index("# Graphs"))
+                gantt = ET.parse(execution / gantt_name)
+                bars = [
+                    node
+                    for node in gantt.iter("{http://www.w3.org/2000/svg}rect")
+                    if "data-task-id" in node.attrib
+                ]
+                self.assertEqual(len(bars), count)
+                if candidate == "normal":
+                    self.assertEqual(
+                        {bar.attrib["data-run"] for bar in bars},
+                        {"run001", "run003"},
+                    )
+                    labels = [
+                        node.text
+                        for node in gantt.iter("{http://www.w3.org/2000/svg}text")
+                    ]
+                    self.assertEqual(labels.count("run001"), 1)
+                    self.assertEqual(labels.count("run003"), 1)
+            self.assertNotIn("trials_calibrate_normal_task_gantt.svg", source)
             self.assertTrue((execution / "trials_calibrate_completed.svg").is_file())
             with patch("pulp_juicer.trial_report.shutil.which") as which:
                 self.assertEqual(render_trial_report(execution), report)
@@ -276,7 +367,7 @@ class TestReportDiscovery(unittest.TestCase):
 
             source_path = execution / "trials.qmd"
             source_path.write_text(
-                source.replace("<!-- pulp-juicer-trial-layout: 10 -->", "")
+                source.replace("<!-- pulp-juicer-trial-layout: 13 -->", "")
             )
             with (
                 patch(
@@ -289,7 +380,7 @@ class TestReportDiscovery(unittest.TestCase):
                 self.assertEqual(render_trial_report(execution), report)
             refreshed.assert_called_once()
             self.assertIn(
-                "<!-- pulp-juicer-trial-layout: 10 -->", source_path.read_text()
+                "<!-- pulp-juicer-trial-layout: 13 -->", source_path.read_text()
             )
 
     def test_existing_report_needs_no_quarto(self):

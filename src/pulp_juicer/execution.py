@@ -121,10 +121,13 @@ def execute_test_plan(
     *,
     monitor_cpu: bool = True,
     force: bool = False,
+    post_debug: bool = False,
     on_skip: Callable[[RunMetadata], None] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[RunResultMetadata, ...]:
     """Run every record in order and return one result record per measurement."""
+    if post_debug and len(plan.runs) != 1:
+        raise ValueError("Post-debug requires exactly one run")
     runtime = ComposeRuntime(plan)
     built = set()
     sources = {}
@@ -244,7 +247,11 @@ def execute_test_plan(
                         if on_progress:
                             on_progress(f"Saved Compose logs: {log_path}")
                     finally:
-                        runtime.close()
+                        if post_debug:
+                            if on_progress:
+                                on_progress("Keeping services running for post-debug")
+                        else:
+                            runtime.close()
                 if on_progress:
                     on_progress("Post-test hooks finished")
 
@@ -282,5 +289,6 @@ def execute_test_plan(
                     f"{result.failures} failures"
                 )
     finally:
-        runtime.close()
+        if not post_debug:
+            runtime.close()
     return tuple(results)

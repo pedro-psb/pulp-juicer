@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.text import Text
 
 from .catalog import experiments
+from .compose_runtime import ComposeRuntime
 from .execution import execute_test_plan
 from .execution_ids import latest_execution_id, next_execution_id
 from .execution_log import ExecutionLog
@@ -71,11 +72,39 @@ def _list_run_columns(runs):
         )
 
 
-def _list_experiments():
+def _list_experiments(*, include_scenarios=True):
     for experiment, _ in experiments().values():
         _print_styled((experiment.id, "bold cyan"), ": ", experiment.short_description)
-        for scenario in experiment.scenarios:
-            _print_styled("  ", (scenario.id, "green"), ": ", scenario.description)
+        if include_scenarios:
+            for scenario in experiment.scenarios:
+                _print_styled("  ", (scenario.id, "green"), ": ", scenario.description)
+
+
+def _print_post_debug_commands(plan, *, maybe_running=False):
+    project = ComposeRuntime(plan).project
+    compose = list(plan.compose_command)
+    click.echo(
+        "\nPost-debug commands (services may be running):"
+        if maybe_running
+        else "\nPost-debug: services are still running. Try:"
+    )
+    click.echo(f"  export COMPOSE_PROJECT_NAME={shlex.quote(project)}")
+    click.echo(f"  export COMPOSE_FILE={shlex.quote(str(plan.compose_file))}")
+    click.echo()
+    for args in (
+        [*compose, "ps"],
+        [*compose, "exec", "pulp", "sh"],
+        [*compose, "logs", "--follow", "pulp"],
+        [
+            "curl",
+            "--user",
+            plan.pulp_connection.username,
+            f"{plan.pulp_connection.base_url.rstrip('/')}/pulp/api/v3/status/",
+        ],
+        [*compose, "down", "--remove-orphans"],
+    ):
+        click.echo(f"  {shlex.join(args)}")
+    click.echo("curl will prompt for the Pulp API password.")
 
 
 @cli.command("ls")
@@ -446,10 +475,17 @@ def clean(targets, workdir, docker_command):
 @click.option(
     "--save-plan", is_flag=True, help="Save the generated execution plan as JSON."
 )
-def squeeze(experiment_id, workdir, run_all, scenario_id, run_id, force, save_plan):
+@click.option(
+    "--post-debug",
+    is_flag=True,
+    help="Leave services running after one --run-id measurement.",
+)
+def squeeze(
+    experiment_id, workdir, run_all, scenario_id, run_id, force, save_plan, post_debug
+):
     """List available runs, or execute an experiment, scenario, or run."""
     if experiment_id is None:
-        _list_experiments()
+        _list_experiments(include_scenarios=False)
         raise click.UsageError("Missing argument 'EXPERIMENT_ID'.")
     registry = experiments()
     if experiment_id not in registry:
@@ -460,6 +496,8 @@ def squeeze(experiment_id, workdir, run_all, scenario_id, run_id, force, save_pl
         )
     if run_id is not None and scenario_id is None:
         raise click.UsageError("--run-id requires --scenario")
+    if post_debug and run_id is None:
+        raise click.UsageError("--post-debug requires --scenario and --run-id")
     experiment, compose_file = registry[experiment_id]
     if not run_all and scenario_id is None:
         _print_styled(
@@ -525,6 +563,7 @@ def squeeze(experiment_id, workdir, run_all, scenario_id, run_id, force, save_pl
         results = execute_test_plan(
             plan,
             on_progress=progress,
+            post_debug=post_debug,
         )
         incomplete = any(
             result.timed_out or result.completed_requests < result.expected_requests
@@ -549,6 +588,8 @@ def squeeze(experiment_id, workdir, run_all, scenario_id, run_id, force, save_pl
                 compose_log = run.result_dir / "compose.log"
                 if compose_log.is_file():
                     click.echo(f"Compose log: {compose_log}", err=True)
+            if post_debug:
+                _print_post_debug_commands(plan, maybe_running=True)
         raise click.ClickException(str(exc)) from exc
     finally:
         if execution_log is not None:
@@ -567,6 +608,8 @@ def squeeze(experiment_id, workdir, run_all, scenario_id, run_id, force, save_pl
             click.echo(f"Compose log: {compose_log}")
     if plan.results_dir.exists():
         click.echo(f"\nResults: {plan.results_dir}")
+    if post_debug:
+        _print_post_debug_commands(plan)
     if incomplete:
         raise click.ClickException("One or more runs were incomplete")
 

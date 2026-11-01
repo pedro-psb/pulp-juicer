@@ -32,7 +32,7 @@ EXPERIMENT = ExperimentConfig(
             id=1,
             name="normal",
             sources={
-                "pulpcore": "../pulpcore",
+                "pulpcore": "https://github.com/pulp/pulpcore.git#3.123.1",
                 "pulp_maven": "https://github.com/pulp/pulp_maven.git#0.37.0",
             },
         ),
@@ -41,7 +41,7 @@ EXPERIMENT = ExperimentConfig(
             name="staging",
             sources={
                 "pulpcore": "../pulpcore",
-                "pulp_maven": "https://github.com/pulp/pulp_maven.git#0.37.0",
+                "pulp_maven": "../pulp_maven",
             },
         ),
     ),
