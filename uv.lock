@@ -190,6 +190,7 @@ dependencies = [
     { name = "packaging" },
     { name = "pyarrow" },
     { name = "rich" },
+    { name = "rpm-rs" },
 ]
 
 [package.dev-dependencies]
@@ -204,6 +205,7 @@ requires-dist = [
     { name = "packaging" },
     { name = "pyarrow", specifier = ">=18" },
     { name = "rich", specifier = ">=15.0.0" },
+    { name = "rpm-rs", specifier = "==0.30.2" },
 ]
 
 [package.metadata.requires-dev]
@@ -1522,6 +1524,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/a5/9672e532fe02cd3b92c78cfd8743abca939d96853006c63835009a1ecb6f/rpds_py-2026.9.1-pp312-pypy312_pp73-musllinux_1_2_x86_64.whl", hash = "sha256:6b9bf3135b4ad5981df9a73d71a35272d650a2985ae9c2746357b24d59de2448", size = 591126, upload-time = "2026-10-04T16:32:29.274Z" },
     { url = "https://files.pythonhosted.org/packages/80/ef/3a9f8e4279c7920af561deed4cb7ebebed2794a8f608cf404d5eef14a105/rpds_py-2026.9.1-pp312-pypy312_pp80-macosx_10_12_x86_64.whl", hash = "sha256:56c6952a9b15047466d0c2347c446a761d4527f89976156341e68f0ce5cc08b0", size = 357108, upload-time = "2026-10-04T16:32:31.641Z" },
     { url = "https://files.pythonhosted.org/packages/b7/55/4b2fa381a583760aea5c92841e4e928a358e1c6511b129219e9c2826a226/rpds_py-2026.9.1-pp312-pypy312_pp80-macosx_11_0_arm64.whl", hash = "sha256:b242c27c8f836305a4a72df9cdd564386ac57b807bd252a063223331c9316b37", size = 346877, upload-time = "2026-10-04T16:32:34.061Z" },
+]
+
+[[package]]
+name = "rpm-rs"
+version = "0.30.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/38/cabff8af1bbbf7473ff736f7d68d8111776b6ccbaf4b0e48d5678e275e63/rpm_rs-0.30.2.tar.gz", hash = "sha256:30c46ec267a621bf9eb9bead2bd5cf17ea512e43297b92ebb5daf140e829e9ec", size = 442520, upload-time = "2026-10-07T13:56:02.714Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/f8/dc75780f5196ccf71c96ed6f686ac24456c5054757123e12871bad4b9bd1/rpm_rs-0.30.2-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:2ed399c72f53a4aecdfede2a9c556c9476da226a83b95be9dc1c5052c446f7c4", size = 2398486, upload-time = "2026-10-07T13:55:56.845Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/03/9d85a9687edb2611113142bc52ca089a32f1213ec910a1566bb4f75c8168/rpm_rs-0.30.2-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:19a5078b5fd16fa3680c4a3df21e6f0c77ba22987aacff050ea2e77cd97ec996", size = 2775093, upload-time = "2026-10-07T13:55:58.433Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/33/b0ad7ec737e95a7648c01c24174cd67b1d4fd95c486916abea5909f2f81d/rpm_rs-0.30.2-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:a32c21540d319715d749ce88ad40aa33dbf6acfae15d282c29fd2ba3dbfbf215", size = 2786548, upload-time = "2026-10-07T13:55:59.781Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/c3/b60bd82f2c1c7d4b3af6b53f171808f2639c4fc11490b891b50e0ad38dfb/rpm_rs-0.30.2-cp310-abi3-win_amd64.whl", hash = "sha256:9705b9fc81950eb1d0e7b9c2d49ae5285da77ae8347664899da4b6a425a4ae3c", size = 2221907, upload-time = "2026-10-07T13:56:01.346Z" },
 ]
 
 [[package]]

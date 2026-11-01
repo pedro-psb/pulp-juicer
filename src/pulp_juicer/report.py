@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 15 -->"
+_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 19 -->"
 
 
 def read_csv(path):
@@ -443,6 +443,9 @@ def prepare_run(run_dir, results_dir):
         ("pulp_status.json", "Pulp status after the load test"),
         ("pulp_status_error.txt", "Pulp status capture error"),
         ("compose.log", "Compose service logs"),
+        ("collector_error.txt", "Collector capture error"),
+        ("collector_trigger_error.txt", "Triggered collector error"),
+        ("collector_finalize_error.txt", "Collector finalization error"),
         ("tasking.parquet", "Structured Pulp task records"),
         ("data_load.csv", "Requests selected for this run"),
         ("locust_stats.csv", "Locust summary CSV"),
@@ -453,6 +456,10 @@ def prepare_run(run_dir, results_dir):
     ):
         if (run_dir / name).is_file():
             details.append(f"- [{label}]({asset(name)})")
+    for path in sorted((run_dir / "collectors").glob("*.parquet")):
+        details.append(
+            f"- [{path.stem} collector Parquet]({asset(f'collectors/{path.name}')})"
+        )
     details.append("")
     timeline += task_timeline
     if len(timeline) == 2:

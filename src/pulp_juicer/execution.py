@@ -3,6 +3,7 @@
 import hashlib
 import json
 import shutil
+import subprocess
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
@@ -287,6 +288,72 @@ def execute_test_plan(
                                 on_progress(f"Saved Pulp status: {status_path}")
                 finally:
                     try:
+                        if runtime.started:
+                            if on_progress:
+                                on_progress("Triggering random collector")
+                            try:
+                                response = runtime.trigger_collector("random")
+                            except (
+                                OSError,
+                                subprocess.CalledProcessError,
+                                subprocess.TimeoutExpired,
+                            ) as exc:
+                                detail = f"{type(exc).__name__}: {exc}"
+                                if (
+                                    isinstance(exc, subprocess.CalledProcessError)
+                                    and exc.stderr
+                                ):
+                                    detail += f"\n{exc.stderr.strip()}"
+                                (
+                                    run.result_dir / "collector_trigger_error.txt"
+                                ).write_text(detail + "\n")
+                                if on_progress:
+                                    on_progress(f"Random collector failed: {exc}")
+                            else:
+                                if on_progress:
+                                    on_progress(
+                                        f"Random collector finished: {response}"
+                                    )
+                            if on_progress:
+                                on_progress("Finalizing periodic collectors")
+                            try:
+                                response = runtime.finalize_collectors()
+                            except (
+                                OSError,
+                                subprocess.CalledProcessError,
+                                subprocess.TimeoutExpired,
+                            ) as exc:
+                                detail = f"{type(exc).__name__}: {exc}"
+                                if (
+                                    isinstance(exc, subprocess.CalledProcessError)
+                                    and exc.stderr
+                                ):
+                                    detail += f"\n{exc.stderr.strip()}"
+                                (
+                                    run.result_dir / "collector_finalize_error.txt"
+                                ).write_text(detail + "\n")
+                                if on_progress:
+                                    on_progress(f"Collector finalization failed: {exc}")
+                            else:
+                                if on_progress:
+                                    on_progress(f"Collectors finalized: {response}")
+                            if on_progress:
+                                on_progress("Capturing collector outputs")
+                            try:
+                                collector_dir = runtime.copy_collector_outputs(
+                                    run.result_dir / "collectors"
+                                )
+                            except (OSError, subprocess.CalledProcessError) as exc:
+                                (run.result_dir / "collector_error.txt").write_text(
+                                    f"{type(exc).__name__}: {exc}\n"
+                                )
+                                if on_progress:
+                                    on_progress(f"Collector outputs unavailable: {exc}")
+                            else:
+                                if on_progress:
+                                    on_progress(
+                                        f"Saved collector outputs: {collector_dir}"
+                                    )
                         if on_progress:
                             on_progress("Capturing Compose logs")
                         log_path = runtime.dump_logs(run.result_dir / "compose.log")

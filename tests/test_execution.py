@@ -490,6 +490,35 @@ class TestExecution(unittest.TestCase):
             self.assertEqual(locust.call_count, 2)
             self.assertEqual(write_context.call_count, 2)
             self.assertEqual(runtime_type.return_value.dump_logs.call_count, 2)
+            self.assertEqual(
+                [
+                    call.args[0]
+                    for call in runtime_type.return_value.trigger_collector.call_args_list
+                ],
+                ["random", "random"],
+            )
+            self.assertEqual(
+                runtime_type.return_value.finalize_collectors.call_count, 2
+            )
+            self.assertEqual(
+                [
+                    call.args[0]
+                    for call in runtime_type.return_value.copy_collector_outputs.call_args_list
+                ],
+                [run.result_dir / "collectors" for run in runs],
+            )
+            operations = [call[0] for call in runtime_type.return_value.mock_calls]
+            self.assertLess(
+                operations.index("trigger_collector"),
+                operations.index("finalize_collectors"),
+            )
+            self.assertLess(
+                operations.index("finalize_collectors"),
+                operations.index("copy_collector_outputs"),
+            )
+            self.assertLess(
+                operations.index("copy_collector_outputs"), operations.index("close")
+            )
             self.assertEqual(get_status.call_count, 2)
             self.assertEqual(
                 [call.args[0] for call in get_status.call_args_list],
@@ -558,7 +587,98 @@ class TestExecution(unittest.TestCase):
             )
             self.assertEqual(output.read_text(), "pulp | 2026-01-01T00:00:00Z ready\n")
 
-    def test_status_capture_failure_does_not_discard_completed_result(self):
+    def test_compose_runtime_copies_collectors_before_teardown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = SimpleNamespace(
+                experiment=SimpleNamespace(id="smoke"),
+                repository_root=root,
+                compose_file=root / "compose.yaml",
+                compose_command=("docker", "compose"),
+            )
+            runtime = ComposeRuntime(plan)
+            runtime.files = (plan.compose_file,)
+            destination = root / "collectors"
+            with patch("pulp_juicer.compose_runtime.subprocess.run") as command:
+                self.assertEqual(
+                    runtime.copy_collector_outputs(destination), destination
+                )
+            self.assertTrue(destination.is_dir())
+            self.assertEqual(
+                command.call_args.args[0][-3:],
+                [
+                    "cp",
+                    "pulp:/var/lib/pulp/juicer/.",
+                    str(destination),
+                ],
+            )
+
+    def test_compose_runtime_waits_for_triggered_collector_with_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = SimpleNamespace(
+                experiment=SimpleNamespace(id="smoke"),
+                repository_root=root,
+                compose_file=root / "compose.yaml",
+                compose_command=("docker", "compose"),
+            )
+            runtime = ComposeRuntime(plan)
+            runtime.files = (plan.compose_file,)
+            with patch(
+                "pulp_juicer.compose_runtime.subprocess.run",
+                return_value=SimpleNamespace(stdout='{"status":"finished"}\n'),
+            ) as command:
+                self.assertEqual(
+                    runtime.trigger_collector("random", timeout_seconds=2),
+                    '{"status":"finished"}',
+                )
+            self.assertEqual(command.call_args.kwargs["timeout"], 7)
+            self.assertTrue(command.call_args.kwargs["capture_output"])
+            self.assertEqual(
+                command.call_args.args[0][-9:],
+                [
+                    "exec",
+                    "--no-TTY",
+                    "pulp",
+                    "/usr/bin/python3",
+                    "/usr/libexec/pulp-juicer/control.py",
+                    "collect",
+                    "random",
+                    "--timeout",
+                    "2",
+                ],
+            )
+
+    def test_compose_runtime_finalizes_periodic_collectors(self):
+        plan = SimpleNamespace(
+            experiment=SimpleNamespace(id="smoke"),
+            repository_root=Path("/tmp"),
+            compose_file=Path("/tmp/compose.yaml"),
+            compose_command=("docker", "compose"),
+        )
+        runtime = ComposeRuntime(plan)
+        runtime.files = (plan.compose_file,)
+        with patch(
+            "pulp_juicer.compose_runtime.subprocess.run",
+            return_value=SimpleNamespace(stdout='{"status":"finished"}\n'),
+        ) as command:
+            runtime.finalize_collectors(timeout_seconds=3)
+        self.assertEqual(command.call_args.kwargs["timeout"], 8)
+        self.assertEqual(
+            command.call_args.args[0][-8:],
+            [
+                "exec",
+                "--no-TTY",
+                "pulp",
+                "/usr/bin/python3",
+                "/usr/libexec/pulp-juicer/control.py",
+                "finalize",
+                "--timeout",
+                "3",
+            ],
+        )
+
+    def test_status_and_collector_timeout_do_not_discard_completed_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = root / "result"
@@ -607,7 +727,7 @@ class TestExecution(unittest.TestCase):
                 )
 
             with (
-                patch("pulp_juicer.execution.ComposeRuntime"),
+                patch("pulp_juicer.execution.ComposeRuntime") as runtime_type,
                 patch("pulp_juicer.execution.run_locust", side_effect=fake_locust),
                 patch(
                     "pulp_juicer.execution.PulpClient.get",
@@ -615,6 +735,9 @@ class TestExecution(unittest.TestCase):
                 ),
                 patch("pulp_juicer.execution._write_run_context"),
             ):
+                runtime_type.return_value.trigger_collector.side_effect = (
+                    subprocess.TimeoutExpired("docker compose exec", 20)
+                )
                 results = execute_test_plan(plan)
 
             self.assertEqual(len(results), 1)
@@ -622,6 +745,10 @@ class TestExecution(unittest.TestCase):
             self.assertFalse((output / "pulp_status.json").exists())
             self.assertEqual(
                 (output / "pulp_status_error.txt").read_text(), "OSError: offline\n"
+            )
+            self.assertIn(
+                "TimeoutExpired:",
+                (output / "collector_trigger_error.txt").read_text(),
             )
 
 

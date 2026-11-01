@@ -104,7 +104,7 @@ EXPERIMENT = ExperimentConfig(
             run_order=(1, 2),
             load=StepFunctionLoad(
                 steps=(LoadStep(at_seconds=0, users=30),),
-                request_count=650,
+                request_count=120,
             ),
         ),
     ),

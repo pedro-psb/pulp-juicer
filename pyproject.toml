@@ -8,6 +8,7 @@ dependencies = [
     "packaging",
     "pyarrow>=18",
     "rich>=15.0.0",
+    "rpm-rs==0.30.2",
 ]
 
 [project.scripts]

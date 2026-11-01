@@ -203,6 +203,11 @@ class TestReportDiscovery(unittest.TestCase):
                     "Name,Request Count,Failure Count,Requests/s,Average Response Time,95%\n"
                     "Aggregated,2,1,1.5,12,20\n"
                 )
+                (run_dir / "collectors").mkdir()
+                pq.write_table(
+                    pa.table({"timestamp_utc": [datetime(2026, 1, 1, tzinfo=UTC)]}),
+                    run_dir / "collectors" / "timestamps.parquet",
+                )
             existing.mkdir()
             (existing / "report.html").write_text("<html>existing</html>")
             (existing / "report.qmd").write_text("existing source")
@@ -248,6 +253,10 @@ class TestReportDiscovery(unittest.TestCase):
                 self.assertIn(execution.name, document)
                 self.assertIn(
                     f"| {execution.name} | burst | run001 | normal | 2 | 1 |",
+                    document,
+                )
+                self.assertIn(
+                    "[timestamps collector Parquet](burst/normal/run001/collectors/timestamps.parquet)",
                     document,
                 )
             self.assertEqual((existing / "report.qmd").read_text(), "existing source")

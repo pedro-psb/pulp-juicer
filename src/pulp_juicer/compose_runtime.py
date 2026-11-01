@@ -31,6 +31,7 @@ class ComposeRuntime:
         check: bool = True,
         capture: bool = False,
         output: TextIO | None = None,
+        timeout: float | None = None,
     ):
         command = [*self.plan.compose_command, "--project-name", self.project]
         for file in files:
@@ -44,9 +45,12 @@ class ComposeRuntime:
             env=env,
             check=check,
             text=True,
-            capture_output=capture,
-            stdout=output,
-            stderr=subprocess.STDOUT if output is not None else None,
+            timeout=timeout,
+            **(
+                {"stdout": output, "stderr": subprocess.STDOUT}
+                if output is not None
+                else {"capture_output": capture}
+            ),
         )
 
     def destroy_before_start(self, *, reset: bool = False):
@@ -138,3 +142,43 @@ class ComposeRuntime:
                 if result.returncode:
                     log.write(f"Compose logs exited with status {result.returncode}.\n")
         return path
+
+    def copy_collector_outputs(self, destination: Path) -> Path:
+        """Copy every collector's flushed CSV before removing the container."""
+        destination.mkdir(parents=True, exist_ok=True)
+        self.command(
+            self.files,
+            self.environment,
+            "cp",
+            "pulp:/var/lib/pulp/juicer/.",
+            str(destination),
+        )
+        return destination
+
+    def trigger_collector(self, name: str, timeout_seconds: float = 15) -> str:
+        """Ask the s6 collector to run a named job and await its reply."""
+        return self._request_collector("collect", name, timeout_seconds)
+
+    def finalize_collectors(self, timeout_seconds: float = 15) -> str:
+        """Stop periodic sampling and wait until Parquet footers are written."""
+        return self._request_collector("finalize", None, timeout_seconds)
+
+    def _request_collector(
+        self, command: str, name: str | None, timeout_seconds: float
+    ) -> str:
+        result = self.command(
+            self.files,
+            self.environment,
+            "exec",
+            "--no-TTY",
+            "pulp",
+            "/usr/bin/python3",
+            "/usr/libexec/pulp-juicer/control.py",
+            command,
+            *((name,) if name else ()),
+            "--timeout",
+            str(timeout_seconds),
+            capture=True,
+            timeout=timeout_seconds + 5,
+        )
+        return result.stdout.strip()

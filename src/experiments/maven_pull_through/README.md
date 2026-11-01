@@ -21,12 +21,15 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - Each fixture is an experiment-specific class derived from `ServiceFixture` or `VolumeFixture`.
 - `compose.yaml` defines Pulp; the runner adds fixture service fragments from required fixture metadata.
 - `Containerfile` builds Pulp with the selected pulpcore and plugin source contexts.
+- `pulp_juicer/collector` supplies a noarch RPM with the s6 collector service. Each periodic collector has its own async sampling task and Parquet file; the initial timestamp collector records once per second from s6 startup. Before teardown, the runner requests the on-demand random collector through a Unix socket, then asks the daemon to finalize periodic Parquet files and waits for the reply before copying all files into the run's `collectors/` directory.
 - `settings/settings.py` applies shared settings and the selected candidate's `pulp_settings`.
 - `candidates.py` defines one setup function per candidate, used by their `PreTestFunction` records. They configure Maven resources using `pulp_juicer.PulpClient`.
 - `data_service/compose.yaml` defines the upstream HTTP service.
 - `data_service/fixture.py` implements `MavenServiceFixture.build` and `generate_metadata`.
   Run it as a module to generate a small fixture and print its metadata: `python -m experiments.maven_pull_through.data_service.fixture --count 10 --size 1024`.
 - `scenario_input.py` combines fixture and candidate setup results with the load into a serializable request specification.
+
+The Containerfile builds and installs the collector RPM with `rpm-rs` and installs PyArrow into the image with `uv`. To build the RPM outside Docker for inspection, run `uv run --locked python src/pulp_juicer/collector/build_rpm.py _juice/rpm` from the repository root.
 
 Each scenario declares its fixture dependencies with `RequireFixture(name, args)`.
 The runner resolves each `RequireFixture` by name and passes its `args` as keyword arguments to the concrete fixture constructor, along with `name` and `output_dir`.
