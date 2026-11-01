@@ -1,207 +1,30 @@
-"""Extract Pulp task lifecycle records from Compose logs for reporting."""
+"""Summarize Pulp task rows captured from the database collector."""
 
 import html
 import json
 import math
-import re
 import statistics
 from collections import Counter, defaultdict
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
-import pyarrow as pa
 import pyarrow.parquet as pq
-
-TASK_SCHEMA = pa.schema(
-    [
-        pa.field("task_id", pa.string(), nullable=False),
-        pa.field("task_type", pa.string()),
-        pa.field("domain", pa.string()),
-        pa.field("service", pa.string()),
-        pa.field("worker", pa.string()),
-        pa.field("immediate", pa.bool_()),
-        pa.field("deferred", pa.bool_()),
-        pa.field("dispatched_at_utc", pa.timestamp("us", tz="UTC")),
-        pa.field("started_at_utc", pa.timestamp("us", tz="UTC")),
-        pa.field("finished_at_utc", pa.timestamp("us", tz="UTC")),
-        pa.field("status", pa.string(), nullable=False),
-        pa.field("execution_time_us", pa.int64()),
-        pa.field("observed_elapsed_us", pa.int64()),
-        pa.field("waiting_time_us", pa.int64()),
-        pa.field("failure_reason", pa.string()),
-    ],
-    metadata={
-        b"source": b"compose.log",
-        b"duration_unit": b"microseconds",
-        b"version": b"2",
-    },
-)
-
-_PREFIX = re.compile(r"^\s*(?P<service>[^|]+)\|\s*(?P<timestamp>\S+)\s+")
-_LOGGER = re.compile(r"pulpcore\.tasking\.tasks:(?:INFO|WARNING|ERROR):\s*")
-_DISPATCH = re.compile(
-    r"pulpcore\.tasking\._util:INFO:\s*Dispatched scheduled task "
-    r"(?P<task_type>\S+) as task id (?P<task_id>\S+) in domain (?P<domain>\S+)"
-)
-_START = re.compile(
-    r"^Starting task id: (?P<task_id>\S+) in domain: (?P<domain>[^,]+), "
-    r"task_type: (?P<task_type>[^,]+), immediate: (?P<immediate>True|False), "
-    r"deferred: (?P<deferred>True|False), worker: (?P<worker>\S+)"
-)
-_COMPLETE = re.compile(
-    r"^Task completed (?P<task_id>\S+) in domain: (?P<domain>[^,]+), "
-    r"task_type: (?P<task_type>[^,]+), immediate: (?P<immediate>True|False), "
-    r"deferred: (?P<deferred>True|False), execution_time: "
-    r"(?P<execution_time_us>\d+) (?:μs|us)"
-)
-_FAIL = re.compile(
-    r"^Task\[(?P<task_type>[^]]+)\] (?P<task_id>\S+) failed "
-    r"\((?P<failure_reason>.*)\) in domain: (?P<domain>.+)$"
-)
-
-
-def parse_tasking_log(log_path: Path) -> list[dict]:
-    """Join start and terminal log records by task ID, retaining partial records."""
-    records: dict[str, dict] = {}
-    dispatches: dict[str, datetime] = {}
-    with log_path.open(errors="replace") as source:
-        for line in source:
-            prefix = _PREFIX.match(line)
-            if prefix is None:
-                continue
-            try:
-                timestamp = datetime.fromisoformat(prefix["timestamp"]).astimezone(UTC)
-            except ValueError:
-                continue
-            dispatch = _DISPATCH.search(line, prefix.end())
-            if dispatch:
-                task_id = dispatch["task_id"]
-                dispatches[task_id] = timestamp
-                continue
-            marker = _LOGGER.search(line, prefix.end())
-            if marker is None:
-                continue
-            message = line[marker.end() :].strip()
-            start = _START.match(message)
-            complete = _COMPLETE.match(message)
-            failure = _FAIL.match(message)
-            event = start or complete or failure
-            if event is None:
-                continue
-            fields = event.groupdict()
-            task_id = fields.pop("task_id")
-            row = records.setdefault(
-                task_id,
-                {
-                    "task_id": task_id,
-                    "task_type": None,
-                    "domain": None,
-                    "service": None,
-                    "worker": None,
-                    "immediate": None,
-                    "deferred": None,
-                    "dispatched_at_utc": None,
-                    "started_at_utc": None,
-                    "finished_at_utc": None,
-                    "status": "started",
-                    "execution_time_us": None,
-                    "observed_elapsed_us": None,
-                    "waiting_time_us": None,
-                    "failure_reason": None,
-                },
-            )
-            row["service"] = prefix["service"].strip()
-            row["task_type"] = fields["task_type"]
-            row["domain"] = fields["domain"]
-            for flag in ("immediate", "deferred"):
-                if flag in fields:
-                    row[flag] = fields[flag] == "True"
-            if start:
-                row["started_at_utc"] = timestamp
-                row["worker"] = fields["worker"]
-            elif complete:
-                row["finished_at_utc"] = timestamp
-                row["status"] = "completed"
-                row["execution_time_us"] = int(fields["execution_time_us"])
-            else:
-                row["finished_at_utc"] = timestamp
-                row["status"] = "failed"
-                row["failure_reason"] = fields["failure_reason"]
-    for row in records.values():
-        dispatched = dispatches.get(row["task_id"])
-        if dispatched:
-            row["dispatched_at_utc"] = dispatched
-            if row["started_at_utc"]:
-                row["waiting_time_us"] = max(
-                    0,
-                    int(
-                        (row["started_at_utc"] - dispatched).total_seconds() * 1_000_000
-                    ),
-                )
-        if row["started_at_utc"] and row["finished_at_utc"]:
-            row["observed_elapsed_us"] = max(
-                0,
-                int(
-                    (row["finished_at_utc"] - row["started_at_utc"]).total_seconds()
-                    * 1_000_000
-                ),
-            )
-    return sorted(
-        records.values(),
-        key=lambda row: (
-            row["started_at_utc"] or row["finished_at_utc"],
-            row["task_id"],
-        ),
-    )
-
-
-def analyze_compose_log(run_dir: Path) -> tuple[Path | None, bool]:
-    """Write one task-level Parquet file when the Compose log is new or changed."""
-    log_path = run_dir / "compose.log"
-    if not log_path.is_file():
-        return None, False
-    output = run_dir / "tasking.parquet"
-    if (
-        output.is_file()
-        and output.stat().st_mtime_ns >= log_path.stat().st_mtime_ns
-        and pq.read_schema(output) == TASK_SCHEMA
-    ):
-        return output, False
-    table = pa.Table.from_pylist(parse_tasking_log(log_path), schema=TASK_SCHEMA)
-    temporary = output.with_suffix(".parquet.tmp")
-    try:
-        pq.write_table(table, temporary, compression="zstd")
-        temporary.replace(output)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return output, True
-
-
-def analyze_execution_tasking(execution_dir: Path) -> bool:
-    """Analyze every unit log, including logs from incomplete runs."""
-    changed = False
-    for log_path in sorted(execution_dir.glob("*/*/*/compose.log")):
-        if any(
-            part.startswith("_") for part in log_path.relative_to(execution_dir).parts
-        ):
-            continue
-        _, updated = analyze_compose_log(log_path.parent)
-        changed |= updated
-    return changed
 
 
 def task_metrics(rows: list[dict]) -> dict:
-    """Summarize logged task events over their observed time window."""
+    """Summarize stored task states and their observed execution window."""
     statuses = Counter(row["status"] for row in rows)
     starts = [row["started_at_utc"] for row in rows if row["started_at_utc"]]
     finishes = [row["finished_at_utc"] for row in rows if row["finished_at_utc"]]
     events = [*starts, *finishes]
     duration_s = (max(events) - min(events)).total_seconds() if events else 0
-    waits = [
-        row["waiting_time_us"] / 1000
-        for row in rows
-        if row.get("waiting_time_us") is not None
-    ]
+
+    def delays(field):
+        return [row[field] / 1000 for row in rows if row.get(field) is not None]
+
+    waits = delays("queue_wait_us")
+    unblock = delays("time_to_unblock_us")
+    ready = delays("ready_wait_us")
     durations = [
         row["execution_time_us"] / 1000
         for row in rows
@@ -213,7 +36,6 @@ def task_metrics(rows: list[dict]) -> dict:
         "completed": statuses["completed"],
         "failed": statuses["failed"],
         "task_types": len({row["task_type"] for row in rows if row["task_type"]}),
-        "workers": len({row["worker"] for row in rows if row["worker"]}),
         "throughput": statuses["completed"] / duration_s if duration_s > 0 else None,
         "window_s": duration_s if duration_s > 0 else None,
         "median_execution_ms": statistics.median(durations) if durations else None,
@@ -222,11 +44,17 @@ def task_metrics(rows: list[dict]) -> dict:
         "wait_count": len(waits),
         "median_wait_ms": statistics.median(waits) if waits else None,
         "max_wait_ms": max(waits) if waits else None,
+        "unblock_count": len(unblock),
+        "median_unblock_ms": statistics.median(unblock) if unblock else None,
+        "ready_count": len(ready),
+        "median_ready_ms": statistics.median(ready) if ready else None,
     }
 
 
 def wait_distribution_chart(
-    path: Path, traces: list[tuple[str, str, list[float], int]]
+    path: Path,
+    traces: list[tuple[str, str, list[float], int]],
+    label: str = "Queue wait",
 ) -> bool:
     """Plot task wait counts in shared, rounded millisecond buckets."""
     traces = [trace for trace in traces if trace[2]]
@@ -268,7 +96,7 @@ def wait_distribution_chart(
     parts = [
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-            'role="img" aria-label="Dispatch-to-start wait distribution">'
+            f'role="img" aria-label="{html.escape(label, quote=True)} distribution">'
         ),
         '<rect width="100%" height="100%" fill="#fff"/>',
     ]
@@ -323,7 +151,7 @@ def wait_distribution_chart(
     parts += [
         f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#94a3b8"/>',
         f'<line x1="{left}" y1="{bottom}" x2="{width - right}" y2="{bottom}" stroke="#94a3b8"/>',
-        f'<text x="{width / 2}" y="{bottom + 45}" text-anchor="middle">Dispatch-to-start wait (ms)</text>',
+        f'<text x="{width / 2}" y="{bottom + 45}" text-anchor="middle">{html.escape(label)} (ms)</text>',
         f'<text x="20" y="{(top + bottom) / 2}" transform="rotate(-90 20 {(top + bottom) / 2})" text-anchor="middle">Tasks with wait data (count)</text>',
         "</svg>",
     ]
@@ -332,25 +160,31 @@ def wait_distribution_chart(
 
 
 def _task_chart(path: Path, rows: list[dict], load_start: datetime | None) -> bool:
+    dispatched = [row["created_at_utc"] for row in rows if row["created_at_utc"]]
     started = [row["started_at_utc"] for row in rows if row["started_at_utc"]]
     completed = [
         row["finished_at_utc"]
         for row in rows
         if row["status"] == "completed" and row["finished_at_utc"]
     ]
-    events = [*started, *completed]
+    events = [*dispatched, *started, *completed]
     if not events:
         return False
     origin = load_start or min(events)
+    dispatch_counts = Counter(
+        math.floor((event - origin).total_seconds()) for event in dispatched
+    )
     start_counts = Counter(
         math.floor((event - origin).total_seconds()) for event in started
     )
     complete_counts = Counter(
         math.floor((event - origin).total_seconds()) for event in completed
     )
-    first = min(0, *start_counts, *complete_counts)
-    last = max(1, *start_counts, *complete_counts)
-    maximum = max(1, *start_counts.values(), *complete_counts.values())
+    first = min(0, *dispatch_counts, *start_counts, *complete_counts)
+    last = max(1, *dispatch_counts, *start_counts, *complete_counts)
+    maximum = max(
+        1, *dispatch_counts.values(), *start_counts.values(), *complete_counts.values()
+    )
     width, height = 900, 365
     left, right, top, bottom = 72, 22, 30, 290
     plot_width = width - left - right
@@ -365,7 +199,7 @@ def _task_chart(path: Path, rows: list[dict], load_start: datetime | None) -> bo
     parts = [
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-            'role="img" aria-label="Pulp tasks started and completed per second">'
+            'role="img" aria-label="Pulp tasks dispatched, started, and completed per second">'
         ),
         '<rect width="100%" height="100%" fill="#fff"/>',
     ]
@@ -380,8 +214,9 @@ def _task_chart(path: Path, rows: list[dict], load_start: datetime | None) -> bo
             f'<text x="{x:.1f}" y="{bottom + 20}" text-anchor="middle">{second:.0f}</text>',
         ]
     for name, counts, color, legend_x in (
-        ("Started", start_counts, "#2563eb", left),
-        ("Completed", complete_counts, "#16a34a", left + 160),
+        ("Dispatched", dispatch_counts, "#d97706", left),
+        ("Started", start_counts, "#2563eb", left + 160),
+        ("Completed", complete_counts, "#16a34a", left + 320),
     ):
         points = " ".join(
             f"{x:.1f},{y:.1f}"
@@ -390,7 +225,7 @@ def _task_chart(path: Path, rows: list[dict], load_start: datetime | None) -> bo
             )
         )
         parts += [
-            f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2.5"/>',
+            f'<polyline data-series="{name}" points="{points}" fill="none" stroke="{color}" stroke-width="2.5"/>',
             f'<line x1="{legend_x}" y1="18" x2="{legend_x + 25}" y2="18" stroke="{color}" stroke-width="3"/>',
             f'<text x="{legend_x + 32}" y="22">{name}</text>',
         ]
@@ -419,7 +254,7 @@ def task_report_sections(
     run_dir: Path, execution_dir: Path
 ) -> tuple[list[str], list[str], list[str]]:
     """Build task summary, distribution, and timeline sections from Parquet."""
-    parquet_path = run_dir / "tasking.parquet"
+    parquet_path = run_dir / "collectors" / "tasking.parquet"
     if not parquet_path.is_file():
         return [], [], []
     rows = pq.read_table(parquet_path).to_pylist()
@@ -428,26 +263,22 @@ def task_report_sections(
         "#### Pulp tasks",
         "",
         (
-            "Task records include setup and background activity from the Compose log. "
-            "Execution time is reported by Pulp and excludes queue waiting."
+            "The database snapshot includes setup and background tasks. "
+            "Execution time excludes time before a task starts."
         ),
         "",
     ]
     if not rows:
-        lines += ["No Pulp task lifecycle records were found in the Compose log.", ""]
+        lines += ["No Pulp tasks were found in the database snapshot.", ""]
         return lines, [], []
     metrics = task_metrics(rows)
-    missing_starts = sum(
-        row["status"] == "completed" and row["started_at_utc"] is None for row in rows
-    )
     lines += [
         "| Measure | Value |",
         "|:--|--:|",
         f"| Tasks observed | {metrics['tasks']} |",
-        f"| Started records | {metrics['started']} |",
+        f"| Started | {metrics['started']} |",
         f"| Completed | {metrics['completed']} |",
         f"| Failed | {metrics['failed']} |",
-        f"| Completed without start record | {missing_starts} |",
         f"| Task throughput | {metrics['throughput']:,.2f} completed/s |"
         if metrics["throughput"] is not None
         else "| Task throughput | N/A |",
@@ -455,39 +286,40 @@ def task_report_sections(
         if metrics["window_s"] is not None
         else "| Observed task window | N/A |",
         f"| Task types | {metrics['task_types']} |",
-        f"| Workers observed | {metrics['workers']} |",
-        f"| Sum of reported execution time | {metrics['sum_execution_s']:,.2f} s |",
-        f"| Median completed execution time | {metrics['median_execution_ms']:,.2f} ms |"
+        f"| Total execution time | {metrics['sum_execution_s']:,.2f} s |",
+        f"| Median execution time | {metrics['median_execution_ms']:,.2f} ms |"
         if metrics["median_execution_ms"] is not None
-        else "| Median completed execution time | N/A |",
-        f"| Tasks with dispatch and start logs | {metrics['wait_count']} |",
-        f"| Median dispatch-to-start wait | {metrics['median_wait_ms']:,.2f} ms |"
+        else "| Median execution time | N/A |",
+        f"| Median total queue wait | {metrics['median_wait_ms']:,.2f} ms |"
         if metrics["median_wait_ms"] is not None
-        else "| Median dispatch-to-start wait | N/A |",
-        f"| Max dispatch-to-start wait | {metrics['max_wait_ms']:,.2f} ms |"
-        if metrics["max_wait_ms"] is not None
-        else "| Max dispatch-to-start wait | N/A |",
+        else "| Median total queue wait | N/A |",
+        f"| Median time to unblock | {metrics['median_unblock_ms']:,.2f} ms |"
+        if metrics["median_unblock_ms"] is not None
+        else "| Median time to unblock | N/A |",
+        f"| Median ready queue wait | {metrics['median_ready_ms']:,.2f} ms |"
+        if metrics["median_ready_ms"] is not None
+        else "| Median ready queue wait | N/A |",
         "",
-        "Task throughput is completed tasks divided by the span from the first to last logged task event. Waiting time is available only when the log has a matching dispatch entry, currently for scheduled tasks.",
+        "Task throughput is completed tasks divided by the first-to-last task execution event window. Time to unblock runs from creation until Pulp marks a task ready; ready queue wait runs from that point until execution starts. Total queue wait is creation to start. Missing phase timestamps are excluded from those measures.",
         "",
-    ]
-    waits = [
-        row["waiting_time_us"] / 1000
-        for row in rows
-        if row.get("waiting_time_us") is not None
     ]
     distribution = []
-    if wait_distribution_chart(
-        run_dir / "report_task_wait.svg", [("This run", "#2563eb", waits, len(rows))]
+    for field, title, color, filename in (
+        ("time_to_unblock_us", "Time to unblock", "#2563eb", "report_task_unblock.svg"),
+        ("ready_wait_us", "Ready queue wait", "#e56b35", "report_task_ready_wait.svg"),
     ):
-        distribution = [
-            "#### Dispatch-to-start wait distribution",
-            "",
-            "Bars count tasks with measured waits in each labeled millisecond range. Other tasks have no dispatch timestamp in the log.",
-            "",
-            f"![Dispatch-to-start wait distribution]({asset}/report_task_wait.svg)",
-            "",
-        ]
+        values = [row[field] / 1000 for row in rows if row[field] is not None]
+        if wait_distribution_chart(
+            run_dir / filename, [("This run", color, values, len(rows))], title
+        ):
+            distribution += [
+                f"#### {title} distribution",
+                "",
+                "Bars count tasks in shared millisecond ranges; tasks missing either phase timestamp are excluded.",
+                "",
+                f"![{title} distribution]({asset}/{filename})",
+                "",
+            ]
     grouped = defaultdict(list)
     for row in rows:
         grouped[row["task_type"] or "Unknown"].append(row)
@@ -554,7 +386,7 @@ def task_report_sections(
         timeline = [
             "#### Pulp tasks",
             "",
-            f"![Pulp tasks started and completed per second]({asset}/report_tasks.svg)",
+            f"![Pulp tasks dispatched, started, and completed per second]({asset}/report_tasks.svg)",
             "",
         ]
     return lines, distribution, timeline

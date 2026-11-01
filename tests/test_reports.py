@@ -14,8 +14,8 @@ import pyarrow.parquet as pq
 from click.testing import CliRunner
 
 from pulp_juicer.cli import cli
+from pulp_juicer.collector.task_db import TASK_SCHEMA
 from pulp_juicer.report import completed_runs, prepare_run, render_report
-from pulp_juicer.tasking import TASK_SCHEMA
 from pulp_juicer.trial_report import (
     _mean_sd,
     _median_curve,
@@ -23,6 +23,56 @@ from pulp_juicer.trial_report import (
     _task_gantt,
     render_trial_report,
 )
+
+
+def write_postgres_samples(run_dir, cpu):
+    output = run_dir / "collectors"
+    output.mkdir(exist_ok=True)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = [
+        {
+            "timestamp_utc": start + timedelta(seconds=second),
+            "interval_s": 1.0,
+            "cpu_pct": float(cpu),
+            "cpu_seconds": float(cpu) / 100,
+            "pss_bytes": 64 * 2**20,
+            "processes": 5,
+        }
+        for second in (0, 1)
+    ]
+    pq.write_table(pa.Table.from_pylist(rows), output / "postgres.parquet")
+
+
+def write_content_samples(run_dir):
+    output = run_dir / "collectors"
+    output.mkdir(exist_ok=True)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    io_rows = [
+        {
+            "timestamp_utc": start + timedelta(seconds=second),
+            "worker_pid": pid,
+            "interval_s": 1.0,
+            "storage_read_bytes_per_s": rate * 2**20,
+            "storage_write_bytes_per_s": 0.5 * 2**20,
+            "read_syscalls_per_s": 10.0,
+            "write_syscalls_per_s": 5.0,
+        }
+        for second in (0, 1)
+        for pid, rate in ((11, 1), (12, 2))
+    ]
+    pq.write_table(pa.Table.from_pylist(io_rows), output / "content_io.parquet")
+    temp_rows = [
+        {
+            "timestamp_utc": start + timedelta(seconds=second),
+            "active_files": files,
+            "active_bytes": size * 2**20,
+            "allocated_bytes": size * 2**20,
+            "root_files": 1,
+            "root_bytes": 2**20,
+        }
+        for second, files, size in ((0, 2, 1), (1, 4, 3))
+    ]
+    pq.write_table(pa.Table.from_pylist(temp_rows), output / "pulp_temp.parquet")
 
 
 class TestReportDiscovery(unittest.TestCase):
@@ -43,17 +93,23 @@ class TestReportDiscovery(unittest.TestCase):
             (run_dir / "requests.csv").write_text(
                 "started_at_utc\n2026-01-01T00:00:00+00:00\n2026-01-01T00:00:01+00:00\n"
             )
-            (run_dir / "db_cpu.csv").write_text(
-                "timestamp_utc,elapsed_s,postgres_cpu_pct\n"
-                "2026-01-01T00:00:00+00:00,0,30\n"
-                "2026-01-01T00:00:01+00:00,1,35\n"
-            )
-            (run_dir / "db_cpu_summary.csv").write_text(
-                "postgres_cpu_mean_pct,postgres_cpu_peak_pct,postgres_cpu_seconds,duration_s,samples\n"
-                "32.5,35,0.65,2,2\n"
-            )
+            write_postgres_samples(run_dir, 35)
+            write_content_samples(run_dir)
 
-            prepare_run(run_dir, execution)
+            _, summary, graphs, details = prepare_run(run_dir, execution)
+            self.assertTrue((run_dir / "report_db_memory.svg").is_file())
+            self.assertIn("Mean PSS", "\n".join(summary))
+            self.assertIn("| Storage read | 6.00 MiB |", "\n".join(summary))
+            self.assertIn("| Peak active files | 4 |", "\n".join(summary))
+            self.assertIn("report_content_read_mib_s.svg", "\n".join(graphs))
+            self.assertIn("report_temp_active_bytes.svg", "\n".join(graphs))
+            self.assertIn("content_io collector Parquet", "\n".join(details))
+            for name in ("read_mib_s", "write_mib_s"):
+                svg = (run_dir / f"report_content_{name}.svg").read_text()
+                self.assertIn("Completed requests (right)", svg)
+                self.assertIn("New requests/s (right)", svg)
+                self.assertIn('stroke="#64748b"', svg)
+                self.assertIn('stroke="#7c3aed"', svg)
             for name in ("completed", "throughput", "db_cpu"):
                 with self.subTest(chart=name):
                     root = ET.parse(run_dir / f"report_{name}.svg").getroot()
@@ -190,6 +246,52 @@ class TestReportDiscovery(unittest.TestCase):
         self.assertEqual(response.exit_code, 0, response.output)
         self.assertIn("No completed runs found", response.output)
 
+    def test_report_command_selects_one_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp)
+            selected = results / "maven-pull-through__short-impulse__018"
+            other = results / "maven-pull-through__short-impulse__019"
+            selected.mkdir()
+            other.mkdir()
+            with (
+                patch("pulp_juicer.cli.render_report") as detailed,
+                patch("pulp_juicer.cli.render_trial_report") as trials,
+            ):
+                detailed.return_value = selected / "report.html"
+                trials.return_value = selected / "trials.html"
+                response = CliRunner().invoke(
+                    cli, ["report", selected.name, "--results", str(results)]
+                )
+            self.assertEqual(response.exit_code, 0, response.output)
+            detailed.assert_called_once_with(selected, "quarto")
+            trials.assert_called_once_with(selected, "quarto")
+            self.assertIn(str(selected / "report.html"), response.output)
+            self.assertNotIn(str(other), response.output)
+
+            missing = CliRunner().invoke(
+                cli,
+                [
+                    "report",
+                    "maven-pull-through__short-impulse__020",
+                    "--results",
+                    str(results),
+                ],
+            )
+            self.assertNotEqual(missing.exit_code, 0)
+            self.assertIn("Execution not found", missing.output)
+
+            invalid = CliRunner().invoke(
+                cli,
+                [
+                    "report",
+                    "../maven-pull-through__short-impulse__018",
+                    "--results",
+                    str(results),
+                ],
+            )
+            self.assertNotEqual(invalid.exit_code, 0)
+            self.assertIn("Invalid execution ID", invalid.output)
+
     def test_report_command_renders_each_missing_execution_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp) / "results"
@@ -294,12 +396,8 @@ class TestReportDiscovery(unittest.TestCase):
                     "2026-01-01T00:00:00+00:00,2026-01-01T00:00:01+00:00\n"
                     "2026-01-01T00:00:01+00:00,2026-01-01T00:00:02+00:00\n"
                 )
-                (run_dir / "db_cpu.csv").write_text(
-                    f"timestamp_utc,postgres_cpu_pct\n2026-01-01T00:00:01+00:00,{cpu}\n"
-                )
-                (run_dir / "db_cpu_summary.csv").write_text(
-                    f"postgres_cpu_mean_pct\n{cpu}\n"
-                )
+                write_postgres_samples(run_dir, cpu)
+                write_content_samples(run_dir)
                 if scenario == "burst" and run_id in ("run001", "run002", "run003"):
                     start = datetime(2026, 1, 1, tzinfo=UTC)
                     pq.write_table(
@@ -309,17 +407,23 @@ class TestReportDiscovery(unittest.TestCase):
                                     "task_id": f"{run_id}-task",
                                     "task_type": "maven.pull",
                                     "status": "completed",
-                                    "worker": "worker-1",
-                                    "dispatched_at_utc": start
+                                    "created_at_utc": start
                                     - timedelta(
                                         milliseconds=100 if run_id == "run001" else 200
                                     ),
+                                    "unblocked_at_utc": start
+                                    - timedelta(milliseconds=40),
                                     "started_at_utc": start,
-                                    "finished_at_utc": start + timedelta(seconds=1),
+                                    "finished_at_utc": start
+                                    + timedelta(milliseconds=230),
                                     "execution_time_us": 230000,
-                                    "waiting_time_us": 100000
+                                    "queue_wait_us": 100000
                                     if run_id == "run001"
                                     else 200000,
+                                    "time_to_unblock_us": 60000
+                                    if run_id == "run001"
+                                    else 160000,
+                                    "ready_wait_us": 40000,
                                 },
                                 *(
                                     [
@@ -327,11 +431,15 @@ class TestReportDiscovery(unittest.TestCase):
                                             "task_id": f"{run_id}-extra",
                                             "task_type": "maven.pull",
                                             "status": "completed",
-                                            "worker": "worker-1",
+                                            "created_at_utc": start,
+                                            "unblocked_at_utc": start,
                                             "started_at_utc": start,
                                             "finished_at_utc": start
-                                            + timedelta(seconds=1),
+                                            + timedelta(milliseconds=50),
                                             "execution_time_us": 50000,
+                                            "queue_wait_us": 0,
+                                            "time_to_unblock_us": 0,
+                                            "ready_wait_us": 0,
                                         }
                                     ]
                                     if run_id == "run002"
@@ -340,7 +448,7 @@ class TestReportDiscovery(unittest.TestCase):
                             ],
                             schema=TASK_SCHEMA,
                         ),
-                        run_dir / "tasking.parquet",
+                        run_dir / "collectors" / "tasking.parquet",
                     )
 
             (execution / "execution.log").write_text(
@@ -391,8 +499,14 @@ class TestReportDiscovery(unittest.TestCase):
             self.assertIn("Timing unavailable for 2 trial(s)", source)
             self.assertIn("| staging | 5.00 | -25.00 | -60.00 |", source)
             self.assertIn("### Pulp tasks", source)
+            self.assertIn("### Content-worker I/O", source)
+            self.assertIn("### Pulp temporary files", source)
+            self.assertIn("6.00\u00a0±\u00a00.00", source)
+            self.assertLess(
+                source.index("### Content-worker I/O"), source.index("# Graphs")
+            )
             self.assertIn(
-                "| Candidate | Trials | Tasks | Completed | Failed | Throughput (tasks/s) | Median execution (ms) | Total execution (ms) | Median wait (ms) |",
+                "| Candidate | Trials | Tasks | Completed | Failed | Throughput (tasks/s) | Median execution (ms) | Total execution (ms) | Median queue wait (ms) | Median time to unblock (ms) | Median ready wait (ms) |",
                 source,
             )
             self.assertIn(
@@ -406,6 +520,8 @@ class TestReportDiscovery(unittest.TestCase):
             self.assertNotIn("Sample variance", source)
             self.assertNotIn("| normal | run001 |", source)
             self.assertIn("trials_burst_wait_boxplot.svg", source)
+            self.assertIn("trials_burst_unblock_histogram.svg", source)
+            self.assertIn("trials_burst_ready_wait_histogram.svg", source)
             self.assertGreater(
                 source.index("trials_burst_wait_boxplot.svg"),
                 source.index("# Graphs"),
@@ -418,8 +534,9 @@ class TestReportDiscovery(unittest.TestCase):
                 "run001: median 100.00 ms from 1 task waits", wait_svg.read_text()
             )
             self.assertIn(
-                "Median dispatch-to-start wait per run (ms)", wait_svg.read_text()
+                "Median creation-to-start wait per run (ms)", wait_svg.read_text()
             )
+            self.assertIn("100.00 ms</text>", wait_svg.read_text())
             self.assertEqual(wait_svg.read_text().count("<circle"), 3)
             self.assertNotIn("<polyline", wait_svg.read_text())
             self.assertNotIn("No terminal record", source)
@@ -445,6 +562,11 @@ class TestReportDiscovery(unittest.TestCase):
                 "throughput",
                 "starts",
                 "cpu",
+                "memory",
+                "content_read",
+                "content_write",
+                "temp_bytes",
+                "temp_files",
                 "task_starts",
                 "task_completions",
             ):
@@ -466,6 +588,11 @@ class TestReportDiscovery(unittest.TestCase):
                 )
                 if metric == "throughput":
                     self.assertIn("normal smoothed mean", svg.read_text())
+                if metric in ("content_read", "content_write"):
+                    self.assertIn('data-series="request-completed"', svg.read_text())
+                    self.assertIn('data-series="request-starts"', svg.read_text())
+                    self.assertIn("Median completed requests (right)", svg.read_text())
+                    self.assertIn("Median new requests/s (right)", svg.read_text())
                 self.assertIn(
                     'stroke-opacity="0.22" data-series="run"', svg.read_text()
                 )
@@ -500,7 +627,7 @@ class TestReportDiscovery(unittest.TestCase):
 
             source_path = execution / "trials.qmd"
             source_path.write_text(
-                source.replace("<!-- pulp-juicer-trial-layout: 22 -->", "")
+                source.replace("<!-- pulp-juicer-trial-layout: 26 -->", "")
             )
             with (
                 patch(
@@ -513,7 +640,7 @@ class TestReportDiscovery(unittest.TestCase):
                 self.assertEqual(render_trial_report(execution), report)
             refreshed.assert_called_once()
             self.assertIn(
-                "<!-- pulp-juicer-trial-layout: 22 -->", source_path.read_text()
+                "<!-- pulp-juicer-trial-layout: 26 -->", source_path.read_text()
             )
 
     def test_existing_report_needs_no_quarto(self):

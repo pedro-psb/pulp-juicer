@@ -487,6 +487,9 @@ class TestExecution(unittest.TestCase):
                 [True, True],
             )
             self.assertEqual(runtime_type.return_value.ensure.call_count, 2)
+            self.assertEqual(
+                runtime_type.return_value.wait_for_postgres_idle.call_count, 2
+            )
             self.assertEqual(locust.call_count, 2)
             self.assertEqual(write_context.call_count, 2)
             self.assertEqual(runtime_type.return_value.dump_logs.call_count, 2)
@@ -495,8 +498,9 @@ class TestExecution(unittest.TestCase):
                     call.args[0]
                     for call in runtime_type.return_value.trigger_collector.call_args_list
                 ],
-                ["random", "random"],
+                ["tasking", "tasking"],
             )
+            self.assertEqual(runtime_type.return_value.wait_for_tasks.call_count, 2)
             self.assertEqual(
                 runtime_type.return_value.finalize_collectors.call_count, 2
             )
@@ -508,6 +512,14 @@ class TestExecution(unittest.TestCase):
                 [run.result_dir / "collectors" for run in runs],
             )
             operations = [call[0] for call in runtime_type.return_value.mock_calls]
+            self.assertLess(
+                operations.index("wait_for_postgres_idle"),
+                operations.index("wait_for_tasks"),
+            )
+            self.assertLess(
+                operations.index("wait_for_tasks"),
+                operations.index("trigger_collector"),
+            )
             self.assertLess(
                 operations.index("trigger_collector"),
                 operations.index("finalize_collectors"),
@@ -608,7 +620,7 @@ class TestExecution(unittest.TestCase):
                 command.call_args.args[0][-3:],
                 [
                     "cp",
-                    "pulp:/var/lib/pulp/juicer/.",
+                    "pulp:/var/lib/pgsql/juicer/.",
                     str(destination),
                 ],
             )
@@ -629,7 +641,7 @@ class TestExecution(unittest.TestCase):
                 return_value=SimpleNamespace(stdout='{"status":"finished"}\n'),
             ) as command:
                 self.assertEqual(
-                    runtime.trigger_collector("random", timeout_seconds=2),
+                    runtime.trigger_collector("tasking", timeout_seconds=2),
                     '{"status":"finished"}',
                 )
             self.assertEqual(command.call_args.kwargs["timeout"], 7)
@@ -643,7 +655,7 @@ class TestExecution(unittest.TestCase):
                     "/usr/bin/python3",
                     "/usr/libexec/pulp-juicer/control.py",
                     "collect",
-                    "random",
+                    "tasking",
                     "--timeout",
                     "2",
                 ],
@@ -673,6 +685,64 @@ class TestExecution(unittest.TestCase):
                 "/usr/bin/python3",
                 "/usr/libexec/pulp-juicer/control.py",
                 "finalize",
+                "--timeout",
+                "3",
+            ],
+        )
+
+    def test_compose_runtime_waits_for_tasks_before_snapshot(self):
+        plan = SimpleNamespace(
+            experiment=SimpleNamespace(id="smoke"),
+            repository_root=Path("/tmp"),
+            compose_file=Path("/tmp/compose.yaml"),
+            compose_command=("docker", "compose"),
+        )
+        runtime = ComposeRuntime(plan)
+        runtime.files = (plan.compose_file,)
+        with patch(
+            "pulp_juicer.compose_runtime.subprocess.run",
+            return_value=SimpleNamespace(stdout='{"status":"finished"}\n'),
+        ) as command:
+            runtime.wait_for_tasks(timeout_seconds=3)
+        self.assertEqual(command.call_args.kwargs["timeout"], 13)
+        self.assertEqual(
+            command.call_args.args[0][-8:],
+            [
+                "exec",
+                "--no-TTY",
+                "pulp",
+                "/usr/bin/python3",
+                "/usr/libexec/pulp-juicer/control.py",
+                "wait-tasks",
+                "--timeout",
+                "3",
+            ],
+        )
+
+    def test_compose_runtime_waits_for_postgres_idle_before_load(self):
+        plan = SimpleNamespace(
+            experiment=SimpleNamespace(id="smoke"),
+            repository_root=Path("/tmp"),
+            compose_file=Path("/tmp/compose.yaml"),
+            compose_command=("docker", "compose"),
+        )
+        runtime = ComposeRuntime(plan)
+        runtime.files = (plan.compose_file,)
+        with patch(
+            "pulp_juicer.compose_runtime.subprocess.run",
+            return_value=SimpleNamespace(stdout='{"status":"finished"}\n'),
+        ) as command:
+            runtime.wait_for_postgres_idle(timeout_seconds=3)
+        self.assertEqual(command.call_args.kwargs["timeout"], 13)
+        self.assertEqual(
+            command.call_args.args[0][-8:],
+            [
+                "exec",
+                "--no-TTY",
+                "pulp",
+                "/usr/bin/python3",
+                "/usr/libexec/pulp-juicer/control.py",
+                "wait-postgres-idle",
                 "--timeout",
                 "3",
             ],
@@ -735,6 +805,9 @@ class TestExecution(unittest.TestCase):
                 ),
                 patch("pulp_juicer.execution._write_run_context"),
             ):
+                runtime_type.return_value.wait_for_tasks.side_effect = (
+                    subprocess.TimeoutExpired("docker compose exec", 600)
+                )
                 runtime_type.return_value.trigger_collector.side_effect = (
                     subprocess.TimeoutExpired("docker compose exec", 20)
                 )
@@ -745,6 +818,12 @@ class TestExecution(unittest.TestCase):
             self.assertFalse((output / "pulp_status.json").exists())
             self.assertEqual(
                 (output / "pulp_status_error.txt").read_text(), "OSError: offline\n"
+            )
+            self.assertIn(
+                "TimeoutExpired:", (output / "task_wait_error.txt").read_text()
+            )
+            runtime_type.return_value.trigger_collector.assert_called_once_with(
+                "tasking"
             )
             self.assertIn(
                 "TimeoutExpired:",

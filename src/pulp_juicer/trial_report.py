@@ -16,17 +16,30 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
+from .collector_metrics import (
+    MIB,
+    content_io_series,
+    read_samples,
+    summarize_content_io,
+    summarize_pulp_temp,
+)
 from .execution_timing import PHASES, parse_execution_timings
+from .postgres_metrics import read_postgres_samples, summarize_postgres
 from .report import completed_runs, markdown_value, read_csv
-from .tasking import task_metrics
+from .tasking import task_metrics, wait_distribution_chart
 
 _COLORS = ("#2563eb", "#e56b35", "#16a34a", "#a855f7", "#dc2626", "#0891b2")
-_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 22 -->"
+_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 26 -->"
 _METRICS = (
     ("completed", "Cumulative completed requests", "Completed requests (count)"),
     ("throughput", "Completed requests per second", "Completed requests/s"),
     ("starts", "New requests per second", "New requests/s"),
     ("cpu", "PostgreSQL CPU", "PostgreSQL CPU (% of one core)"),
+    ("memory", "PostgreSQL memory", "PostgreSQL PSS (MiB)"),
+    ("content_read", "Content-worker storage read", "Storage read (MiB/s)"),
+    ("content_write", "Content-worker storage write", "Storage write (MiB/s)"),
+    ("temp_bytes", "Pulp temporary file size", "Active files (MiB)"),
+    ("temp_files", "Pulp temporary file count", "Active files (count)"),
     ("task_starts", "Pulp tasks started per second", "Tasks started/s"),
     ("task_completions", "Pulp tasks completed per second", "Tasks completed/s"),
 )
@@ -44,6 +57,9 @@ class Trial:
     mean_ms: float | None
     p95_ms: float | None
     cpu_pct: float | None
+    memory_mib: float | None
+    content_io_summary: dict | None
+    temp_summary: dict | None
     metadata: dict | None
     series: dict[str, list[tuple[float, float]]]
     tasks: list[dict] | None
@@ -62,46 +78,77 @@ def _float(row, key):
 
 def _timeline(run_dir: Path, metadata: dict | None):
     request_path = run_dir / "requests.csv"
-    if not request_path.is_file():
-        return {}
-    rows = read_csv(request_path)
-    if not rows:
-        return {}
+    rows = read_csv(request_path) if request_path.is_file() else []
     starts = [datetime.fromisoformat(row["started_at_utc"]).timestamp() for row in rows]
     completions = [
         datetime.fromisoformat(row["completed_at_utc"]).timestamp() for row in rows
     ]
+    postgres = read_postgres_samples(run_dir)
+    content_io = read_samples(run_dir, "content_io")
+    temp = read_samples(run_dir, "pulp_temp")
     saved_start = (metadata or {}).get("result", {}).get("load_start_utc")
-    origin = (
-        datetime.fromisoformat(saved_start).timestamp() if saved_start else min(starts)
-    )
-    start_counts = Counter(max(0, math.floor(t - origin)) for t in starts)
-    completed_counts = Counter(max(0, math.floor(t - origin)) for t in completions)
-    last_second = max(0, math.ceil(max((*starts, *completions)) - origin))
-    cumulative = 0
-    completed = []
-    throughput = []
-    new_requests = []
-    for second in range(last_second + 1):
-        count = completed_counts[second]
-        cumulative += count
-        completed.append((second, cumulative))
-        throughput.append((second, count))
-        new_requests.append((second, start_counts[second]))
-    series = {
-        "completed": completed,
-        "throughput": throughput,
-        "starts": new_requests,
-    }
-    cpu_path = run_dir / "db_cpu.csv"
-    if cpu_path.is_file():
+    observed = [*starts, *completions]
+    observed.extend(row["timestamp_utc"].timestamp() for row in postgres)
+    observed.extend(row["timestamp_utc"].timestamp() for row in content_io)
+    observed.extend(row["timestamp_utc"].timestamp() for row in temp)
+    if not saved_start and not observed:
+        return {}
+    if saved_start:
+        origin = datetime.fromisoformat(saved_start).timestamp()
+    elif starts:
+        origin = min(starts)
+    else:
+        origin = min(observed)
+    series = {}
+    if rows:
+        start_counts = Counter(max(0, math.floor(t - origin)) for t in starts)
+        completed_counts = Counter(max(0, math.floor(t - origin)) for t in completions)
+        last_second = max(0, math.ceil(max((*starts, *completions)) - origin))
+        cumulative = 0
+        completed = []
+        throughput = []
+        new_requests = []
+        for second in range(last_second + 1):
+            count = completed_counts[second]
+            cumulative += count
+            completed.append((second, cumulative))
+            throughput.append((second, count))
+            new_requests.append((second, start_counts[second]))
+        series.update(completed=completed, throughput=throughput, starts=new_requests)
+    if postgres:
         series["cpu"] = [
             (
-                datetime.fromisoformat(row["timestamp_utc"]).timestamp() - origin,
-                float(row["postgres_cpu_pct"]),
+                row["timestamp_utc"].timestamp() - origin,
+                row["cpu_pct"],
             )
-            for row in read_csv(cpu_path)
-            if row.get("timestamp_utc") and row.get("postgres_cpu_pct")
+            for row in postgres
+            if row["cpu_pct"] is not None
+        ]
+        series["memory"] = [
+            (
+                row["timestamp_utc"].timestamp() - origin,
+                row["pss_bytes"] / 2**20,
+            )
+            for row in postgres
+            if row["pss_bytes"] is not None
+        ]
+    if content_io:
+        io_series = content_io_series(content_io)
+        for key, name in (
+            ("read_mib_s", "content_read"),
+            ("write_mib_s", "content_write"),
+        ):
+            series[name] = [
+                (time.timestamp() - origin, value) for time, value in io_series[key]
+            ]
+    if temp:
+        series["temp_bytes"] = [
+            (row["timestamp_utc"].timestamp() - origin, row["active_bytes"] / MIB)
+            for row in temp
+        ]
+        series["temp_files"] = [
+            (row["timestamp_utc"].timestamp() - origin, row["active_files"])
+            for row in temp
         ]
     return series
 
@@ -149,10 +196,11 @@ def _read_trial(run_dir: Path) -> Trial | None:
         and result.get("completed_requests", 0) < result["expected_requests"]
     ):
         return None
-    cpu_path = run_dir / "db_cpu_summary.csv"
-    cpu_rows = read_csv(cpu_path) if cpu_path.is_file() else []
+    postgres_summary = summarize_postgres(read_postgres_samples(run_dir)) or {}
+    content_io_summary = summarize_content_io(read_samples(run_dir, "content_io"))
+    temp_summary = summarize_pulp_temp(read_samples(run_dir, "pulp_temp"))
     requests = int(stats["Request Count"])
-    task_path = run_dir / "tasking.parquet"
+    task_path = run_dir / "collectors" / "tasking.parquet"
     tasks = pq.read_table(task_path).to_pylist() if task_path.is_file() else None
     series = _timeline(run_dir, metadata)
     if tasks:
@@ -167,7 +215,10 @@ def _read_trial(run_dir: Path) -> Trial | None:
         rate=_float(stats, "Requests/s"),
         mean_ms=_float(stats, "Average Response Time"),
         p95_ms=_float(stats, "95%"),
-        cpu_pct=_float(cpu_rows[0], "postgres_cpu_mean_pct") if cpu_rows else None,
+        cpu_pct=postgres_summary.get("cpu_mean_pct"),
+        memory_mib=postgres_summary.get("pss_mean_mib"),
+        content_io_summary=content_io_summary,
+        temp_summary=temp_summary,
         metadata=metadata,
         series=series,
         tasks=tasks,
@@ -203,15 +254,15 @@ def _percentile(values, fraction):
 
 
 def _wait_boxplot(path, groups, colors):
-    """Draw one box per candidate from the median wait of each run."""
+    """Draw one box per candidate from each run's total queue-wait median."""
     samples = {}
     for candidate, trials in sorted(groups.items()):
         run_medians = []
         for trial in trials:
             waits = [
-                row["waiting_time_us"] / 1000
+                row["queue_wait_us"] / 1000
                 for row in trial.tasks or []
-                if row.get("waiting_time_us") is not None
+                if row.get("queue_wait_us") is not None
             ]
             if waits:
                 run_medians.append((trial.run_id, statistics.median(waits), len(waits)))
@@ -230,7 +281,7 @@ def _wait_boxplot(path, groups, colors):
         return left + value * plot_width / x_max
 
     items = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Run median dispatch-to-start waits by candidate">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Median creation-to-start wait by candidate">',
         '<rect width="100%" height="100%" fill="#fff"/>',
     ]
     for tick in range(6):
@@ -258,6 +309,9 @@ def _wait_boxplot(path, groups, colors):
             f'<line x1="{x(high):.1f}" y1="{y - 12:.1f}" x2="{x(high):.1f}" y2="{y + 12:.1f}" stroke="{color}" stroke-width="2"/>',
             f'<rect x="{x(q1):.1f}" y="{y - 14:.1f}" width="{max(1, x(q3) - x(q1)):.1f}" height="28" fill="{color}" fill-opacity="0.22" stroke="{color}"/>',
             f'<line x1="{x(middle):.1f}" y1="{y - 14:.1f}" x2="{x(middle):.1f}" y2="{y + 14:.1f}" stroke="{color}" stroke-width="3"/>',
+            f'<text x="{x(middle) + (8 if middle <= x_max * 0.8 else -8):.1f}" '
+            f'y="{y - 20:.1f}" text-anchor="{("start" if middle <= x_max * 0.8 else "end")}" '
+            f'fill="{color}">{middle:,.2f} ms</text>',
         ]
         for run_id, value, count in runs:
             items.append(
@@ -265,7 +319,7 @@ def _wait_boxplot(path, groups, colors):
                 f"<title>{html.escape(run_id)}: median {value:.2f} ms from {count} task waits</title></circle>"
             )
     items += [
-        f'<text x="{(left + width - right) / 2:.1f}" y="{bottom + 49}" text-anchor="middle">Median dispatch-to-start wait per run (ms)</text>',
+        f'<text x="{(left + width - right) / 2:.1f}" y="{bottom + 49}" text-anchor="middle">Median creation-to-start wait per run (ms)</text>',
         "</svg>",
     ]
     path.write_text("\n".join(items) + "\n")
@@ -285,10 +339,10 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
         "",
         "### Pulp tasks",
         "",
-        "Each value is the mean ± sample SD across runs with task data. Task records include setup and background activity from Compose logs. Throughput is completed tasks divided by the first-to-last task event window. Waiting time requires matching dispatch logs. N/A after ± means only one run had that measurement.",
+        "Each value is the mean ± sample SD across runs with task data. The database snapshot includes setup and background tasks. Throughput is completed tasks divided by the first-to-last execution event window. N/A after ± means only one run had that measurement.",
         "",
-        "| Candidate | Trials | Tasks | Completed | Failed | Throughput (tasks/s) | Median execution (ms) | Total execution (ms) | Median wait (ms) |",
-        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|",
+        "| Candidate | Trials | Tasks | Completed | Failed | Throughput (tasks/s) | Median execution (ms) | Total execution (ms) | Median queue wait (ms) | Median time to unblock (ms) | Median ready wait (ms) |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for candidate, trials in sorted(groups.items()):
         with_tasks = [trial for trial in trials if trial.tasks is not None]
@@ -303,6 +357,8 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
             "median_execution_ms",
             "total_execution_ms",
             "median_wait_ms",
+            "median_unblock_ms",
+            "median_ready_ms",
         )
         lines.append(
             f"| {markdown_value(candidate)} | {len(with_tasks)} | "
@@ -378,13 +434,41 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
         distribution = [
             "### Wait-time distribution",
             "",
-            "#### Dispatch-to-start wait by candidate",
+            "#### Creation-to-start wait by candidate",
             "",
-            "Each point is one run's median wait among tasks with dispatch and start logs. Boxes span the 25th–75th percentiles of run medians; center lines show medians and whiskers show the minimum and maximum. Runs without measured waits are omitted. Hover over points for run IDs and sample counts.",
+            "Each point is one run's median creation-to-start wait. Boxes span the 25th–75th percentiles of run medians; center lines show medians and whiskers show the minimum and maximum. Runs without measured waits are omitted. Hover over points for run IDs and sample counts.",
             "",
-            f"![Dispatch-to-start wait by candidate]({name})",
+            f"![Creation-to-start wait by candidate]({name})",
             "",
         ]
+    for field, title, suffix in (
+        ("time_to_unblock_us", "Time to unblock", "unblock"),
+        ("ready_wait_us", "Ready queue wait", "ready_wait"),
+    ):
+        traces = [
+            (
+                candidate,
+                colors[candidate],
+                [
+                    row[field] / 1000
+                    for trial in trials
+                    for row in trial.tasks or []
+                    if row[field] is not None
+                ],
+                sum(len(trial.tasks or []) for trial in trials),
+            )
+            for candidate, trials in sorted(groups.items())
+        ]
+        filename = f"trials_{safe_scenario}_{suffix}_histogram.svg"
+        if wait_distribution_chart(execution_dir / filename, traces, title):
+            distribution += [
+                f"#### {title} distribution by candidate",
+                "",
+                "Bars pool task observations across runs within each candidate. Candidate summary statistics above give each run equal weight.",
+                "",
+                f"![{title} distribution by candidate]({filename})",
+                "",
+            ]
     return lines, distribution
 
 
@@ -445,21 +529,32 @@ def _smoothed_mean_rate(runs, bandwidth_s=3):
 
 
 def _chart(
-    path: Path, label: str, groups, *, summary_fn=_median_curve, summary_label="median"
+    path: Path,
+    label: str,
+    groups,
+    *,
+    summary_fn=_median_curve,
+    summary_label="median",
+    request_overlays=None,
+    minimum_y=1,
 ):
     if not groups:
         return
     summaries = {candidate: summary_fn(runs) for candidate, _, runs in groups}
-    width, left, right = 960, 84, 24
+    request_overlays = request_overlays or {}
+    width, left, right = (1080, 84, 174) if request_overlays else (960, 84, 24)
     top, plot_height = 30, 300
     bottom = top + plot_height
     legend_top = bottom + 66
-    height = legend_top + len(groups) * 44 + 18
+    height = legend_top + len(groups) * 44 + (55 if request_overlays else 18)
     values = [point for _, _, runs in groups for _, series in runs for point in series]
     values += [point for points in summaries.values() for point in points]
-    x_min = min(0, *(x for x, _ in values))
-    x_max = max(1, *(x for x, _ in values))
-    y_max = max(1, *(y for _, y in values)) * 1.05
+    x_values = values + [
+        point for points in request_overlays.values() for point in points
+    ]
+    x_min = min(0, *(x for x, _ in x_values))
+    x_max = max(1, *(x for x, _ in x_values))
+    y_max = max(minimum_y, *(y for _, y in values)) * 1.05
     plot_width = width - left - right
 
     def xy(x, y):
@@ -480,7 +575,7 @@ def _chart(
         y = xy(0, value)[1]
         items += [
             f'<line x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}" stroke="#e5e7eb"/>',
-            f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end">{value:.0f}</text>',
+            f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end">{value:g}</text>',
         ]
         time = x_min + (x_max - x_min) * index / 4
         x = xy(time, 0)[0]
@@ -527,6 +622,54 @@ def _chart(
                 f'<line x1="{left}" y1="{y}" x2="{left + 25}" y2="{y}" stroke="{color}" stroke-opacity="{opacity}" stroke-width="{thickness}"/>',
                 f'<text x="{left + 34}" y="{y + 4}">{html.escape(name)}</text>',
             ]
+    for index, (key, title, color, axis_title, dashed) in enumerate(
+        (
+            (
+                "completed",
+                "Median completed requests",
+                "#64748b",
+                "Completed requests",
+                True,
+            ),
+            ("starts", "Median new requests/s", "#7c3aed", "New requests/s", False),
+        )
+    ):
+        points = request_overlays.get(key)
+        if not points:
+            continue
+        scale = max(1, *(value for _, value in points))
+        position = width - right + index * 96
+        axis_x = position + 55
+        dash = ' stroke-dasharray="5 5"' if dashed else ""
+        items.append(
+            f'<line x1="{position}" y1="{top}" x2="{position}" y2="{bottom}" stroke="#94a3b8"/>'
+        )
+        for fraction in (0, 0.5, 1):
+            y = bottom - fraction * plot_height
+            items.append(
+                f'<text x="{position + 8}" y="{y + 4:.1f}" font-family="sans-serif" '
+                f'font-size="12" fill="#64748b">{scale * fraction:g}</text>'
+            )
+        items.append(
+            f'<text x="{axis_x}" y="{top + plot_height / 2}" '
+            f'transform="rotate(90 {axis_x} {top + plot_height / 2})" text-anchor="middle" '
+            f'font-family="sans-serif" font-size="12" fill="#475569">{axis_title}</text>'
+        )
+        coordinates = " ".join(
+            f"{xy(x, 0)[0]:.1f},{bottom - value * plot_height / scale:.1f}"
+            for x, value in points
+        )
+        items.append(
+            f'<polyline points="{coordinates}" fill="none" stroke="{color}" '
+            f'stroke-width="2"{dash} data-series="request-{key}"/>'
+        )
+        legend_y = legend_top + len(groups) * 44 + index * 22
+        items += [
+            f'<line x1="{left}" y1="{legend_y}" x2="{left + 25}" y2="{legend_y}" '
+            f'stroke="{color}" stroke-width="2"{dash}/>',
+            f'<text x="{left + 34}" y="{legend_y + 4}" font-family="sans-serif" '
+            f'font-size="12" fill="#475569">{title} (right)</text>',
+        ]
     items += [
         (
             f'<text x="{width / 2}" y="{bottom + 45}" text-anchor="middle">'
@@ -689,8 +832,8 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
         "",
         "Each value is the mean ± sample SD across runs (n − 1 denominator). Unavailable measurements are omitted; SD is N/A when only one run has a value. Requests within a run are not independent trials.",
         "",
-        "| Candidate | Trials | Requests | Failures | Failure rate (%) | Requests/s | Mean latency (ms) | Run p95 (ms) | Mean DB CPU (%) |",
-        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|",
+        "| Candidate | Trials | Requests | Failures | Failure rate (%) | Requests/s | Mean latency (ms) | Run p95 (ms) | Mean DB CPU (%) | Mean DB PSS (MiB) |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for candidate, candidate_trials in sorted(groups.items()):
         lines.append(
@@ -705,6 +848,7 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
                     "mean_ms",
                     "p95_ms",
                     "cpu_pct",
+                    "memory_mib",
                 )
             )
             + " |"
@@ -718,12 +862,19 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
             "",
             "Differences are candidate mean minus baseline mean. These are descriptive comparisons of runs, not confidence intervals.",
             "",
-            "| Candidate | Δ Requests/s | Δ Mean latency (ms) | Δ Run p95 (ms) | Δ Failure rate (pp) | Δ Mean DB CPU (pp) |",
-            "|:--|--:|--:|--:|--:|--:|",
+            "| Candidate | Δ Requests/s | Δ Mean latency (ms) | Δ Run p95 (ms) | Δ Failure rate (pp) | Δ Mean DB CPU (pp) | Δ Mean DB PSS (MiB) |",
+            "|:--|--:|--:|--:|--:|--:|--:|",
         ]
         for candidate in names[1:]:
             differences = []
-            for attribute in ("rate", "mean_ms", "p95_ms", "failure_pct", "cpu_pct"):
+            for attribute in (
+                "rate",
+                "mean_ms",
+                "p95_ms",
+                "failure_pct",
+                "cpu_pct",
+                "memory_mib",
+            ):
                 current = _contrast(groups[candidate], attribute)
                 reference = _contrast(groups[baseline], attribute)
                 differences.append(
@@ -752,6 +903,64 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
             "",
             "Some runs have no run metadata, so their completion and configuration could not be verified.",
         ]
+    if any(trial.content_io_summary for trial in trials):
+        lines += [
+            "",
+            "### Content-worker I/O",
+            "",
+            "Each value is the mean ± sample SD of run-level measurements. Storage bytes come from Linux process counters and do not include network traffic. Byte totals approximate the observed counter changes after each worker's first sample.",
+            "",
+            "| Candidate | Trials | Read (MiB) | Written (MiB) | Peak read (MiB/s) | Peak write (MiB/s) | Read syscalls | Write syscalls |",
+            "|:--|--:|--:|--:|--:|--:|--:|--:|",
+        ]
+        for candidate, candidate_trials in sorted(groups.items()):
+            summaries = [
+                trial.content_io_summary
+                for trial in candidate_trials
+                if trial.content_io_summary
+            ]
+            lines.append(
+                f"| {markdown_value(candidate)} | {len(summaries)} | "
+                + " | ".join(
+                    _mean_sd([summary[key] for summary in summaries])
+                    for key in (
+                        "read_mib",
+                        "write_mib",
+                        "peak_read_mib_s",
+                        "peak_write_mib_s",
+                        "read_syscalls",
+                        "write_syscalls",
+                    )
+                )
+                + " |"
+            )
+    if any(trial.temp_summary for trial in trials):
+        lines += [
+            "",
+            "### Pulp temporary files",
+            "",
+            "Each value is the mean ± sample SD of each run's sampled peak. The working directory is shared by content downloads, API uploads, and tasks; short-lived files can fall between samples.",
+            "",
+            "| Candidate | Trials | Peak files | Peak apparent size (MiB) | Peak root-level size (MiB) | Peak allocated size (MiB) |",
+            "|:--|--:|--:|--:|--:|--:|",
+        ]
+        for candidate, candidate_trials in sorted(groups.items()):
+            summaries = [
+                trial.temp_summary for trial in candidate_trials if trial.temp_summary
+            ]
+            lines.append(
+                f"| {markdown_value(candidate)} | {len(summaries)} | "
+                + " | ".join(
+                    _mean_sd([summary[key] for summary in summaries])
+                    for key in (
+                        "peak_files",
+                        "peak_mib",
+                        "peak_root_mib",
+                        "peak_allocated_mib",
+                    )
+                )
+                + " |"
+            )
     lines.extend(_timing_lines(trials, timings))
     task_summary, distribution = _task_summary_lines(
         execution_dir, scenario, groups, colors
@@ -765,7 +974,7 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
         "",
         (
             "Time zero is the recorded load start; older results use the first request start. "
-            "Faint lines show individual runs in each candidate's color. For completed requests per second, thick lines show a Gaussian-smoothed mean (3 s bandwidth); their area equals the mean completed-request count. Other thick lines show the pointwise median across runs observed at each time, with no extrapolation beyond a run's observed window."
+            "Faint lines show individual runs in each candidate's color. For completed requests per second, thick lines show a Gaussian-smoothed mean (3 s bandwidth); their area equals the mean completed-request count. Other thick lines show the pointwise median across runs observed at each time, with no extrapolation beyond a run's observed window. On content I/O charts, gray and purple lines show the median completed requests and new requests per second across the displayed runs, using the labeled right axes."
         ),
         "",
     ]
@@ -791,7 +1000,29 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
                     summary_label="smoothed mean",
                 )
             else:
-                _chart(execution_dir / name, axis_label, chart_groups)
+                request_overlays = None
+                if metric in ("content_read", "content_write"):
+                    displayed = [trial for trial in trials if trial.series.get(metric)]
+                    request_overlays = {
+                        key: curve
+                        for key in ("completed", "starts")
+                        if (
+                            curve := _median_curve(
+                                [
+                                    (trial.run_id, trial.series[key])
+                                    for trial in displayed
+                                    if trial.series.get(key)
+                                ]
+                            )
+                        )
+                    }
+                _chart(
+                    execution_dir / name,
+                    axis_label,
+                    chart_groups,
+                    request_overlays=request_overlays,
+                    minimum_y=0.01 if metric.startswith("content_") else 1,
+                )
             graphs += [f"#### {title}", "", f"![{title}]({name})", ""]
     if not any(trial.series for trial in trials):
         graphs += ["No request timelines available.", ""]
@@ -814,7 +1045,7 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
         graphs += [
             "### Task durations by candidate",
             "",
-            "Each bar spans a logged task start and finish. Time zero is the recorded load start, or the first task start when unavailable. Tasks missing either timestamp are omitted. Colors show completion or failure.",
+            "Each bar spans a task's database start and finish times. Time zero is the recorded load start, or the first task start when unavailable. Tasks missing either timestamp are omitted. Colors show completion or failure.",
             "",
             *gantt,
         ]
@@ -831,7 +1062,7 @@ def render_trial_report(
         source = execution_dir / "trials.qmd"
         task_data_is_newer = any(
             path.stat().st_mtime_ns > report.stat().st_mtime_ns
-            for path in execution_dir.glob("*/*/*/tasking.parquet")
+            for path in execution_dir.glob("*/*/*/collectors/tasking.parquet")
         )
         if not task_data_is_newer and (
             not source.is_file() or _TRIAL_LAYOUT_MARKER in source.read_text()

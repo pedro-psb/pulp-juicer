@@ -21,7 +21,7 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - Each fixture is an experiment-specific class derived from `ServiceFixture` or `VolumeFixture`.
 - `compose.yaml` defines Pulp; the runner adds fixture service fragments from required fixture metadata.
 - `Containerfile` builds Pulp with the selected pulpcore and plugin source contexts.
-- `pulp_juicer/collector` supplies a noarch RPM with the s6 collector service. Each periodic collector has its own async sampling task and Parquet file; the initial timestamp collector records once per second from s6 startup. Before teardown, the runner requests the on-demand random collector through a Unix socket, then asks the daemon to finalize periodic Parquet files and waits for the reply before copying all files into the run's `collectors/` directory.
+- `pulp_juicer/collector` supplies a noarch RPM with the s6 collector service. `PulpComponents` discovers API, content, task worker, and PostgreSQL processes through s6, and exposes Pulp's worker temp directories and database connection settings. Periodic collectors write separate Parquet files: timestamps, PostgreSQL process-tree CPU and memory, per-content-worker storage I/O rates (`content_io.parquet`), and Pulp working-directory files and bytes (`pulp_temp.parquet`). The working directory is shared, so its file counts are not attributable to content workers alone. The collector discovers services as root; its PostgreSQL snapshot helper reads proportional set size (PSS) as the `postgres` user, and its content I/O helper reads process counters as the `pulp` user. Before teardown, the runner requests an on-demand PostgreSQL task snapshot (`tasking.parquet`) through a Unix socket, finalizes periodic Parquet files, and copies them into the run's `collectors/` directory. Compose logs are retained for debugging.
 - `settings/settings.py` applies shared settings and the selected candidate's `pulp_settings`.
 - `candidates.py` defines one setup function per candidate, used by their `PreTestFunction` records. They configure Maven resources using `pulp_juicer.PulpClient`.
 - `data_service/compose.yaml` defines the upstream HTTP service.
@@ -29,7 +29,9 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
   Run it as a module to generate a small fixture and print its metadata: `python -m experiments.maven_pull_through.data_service.fixture --count 10 --size 1024`.
 - `scenario_input.py` combines fixture and candidate setup results with the load into a serializable request specification.
 
-The Containerfile builds and installs the collector RPM with `rpm-rs` and installs PyArrow into the image with `uv`. To build the RPM outside Docker for inspection, run `uv run --locked python src/pulp_juicer/collector/build_rpm.py _juice/rpm` from the repository root.
+The Containerfile builds and installs the collector RPM with `rpm-rs` and installs PyArrow and psutil into the image with `uv`. To build the RPM outside Docker for inspection, run `uv run --locked python src/pulp_juicer/collector/build_rpm.py _juice/rpm` from the repository root.
+
+After pre-test setup, the runner asks the collector to wait up to 2 minutes for two consecutive one-second PostgreSQL CPU samples at zero before starting Locust. After load generation stops, it waits up to 10 minutes for Pulp tasks to reach a final state, excluding scheduled tasks. It then snapshots all task rows and finalizes the periodic collectors. If the task wait times out or fails, it saves `task_wait_error.txt` in the run directory and continues capturing results.
 
 Each scenario declares its fixture dependencies with `RequireFixture(name, args)`.
 The runner resolves each `RequireFixture` by name and passes its `args` as keyword arguments to the concrete fixture constructor, along with `name` and `output_dir`.

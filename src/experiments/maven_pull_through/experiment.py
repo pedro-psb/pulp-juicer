@@ -107,5 +107,16 @@ EXPERIMENT = ExperimentConfig(
                 request_count=120,
             ),
         ),
+        ScenarioConfig(
+            id="short-impulse",
+            description="Temporary experiments.",
+            driver="http_get",
+            requires=(
+                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
+            ),
+            input=scenario_input.build_pull_through,
+            run_order=(1, 2),
+            load=UnitaryImpulseLoad(request_count=1000),
+        ),
     ),
 )

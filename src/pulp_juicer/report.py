@@ -11,7 +11,16 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 19 -->"
+from .collector_metrics import (
+    MIB,
+    content_io_series,
+    read_samples,
+    summarize_content_io,
+    summarize_pulp_temp,
+)
+from .postgres_metrics import read_postgres_samples, summarize_postgres
+
+_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 23 -->"
 
 
 def read_csv(path):
@@ -61,8 +70,6 @@ def run_configuration(metadata, history):
         ),
         f"| Maximum duration | {markdown_value(load['duration'])} |",
         f"| Wait between requests | {load['wait_seconds']} s |",
-        f"| Idle before load | {load['idle_seconds']} s |",
-        f"| Tail after load | {load['tail_seconds']} s |",
         f"| Distribution URL | {markdown_value(metadata['setup']['base_url'])} |",
         f"| Upstream URL | {markdown_value(metadata['upstream_url'])} |",
         f"| Docker Compose project | {markdown_value(metadata['project'])} |",
@@ -369,48 +376,51 @@ def prepare_run(run_dir, results_dir):
             "",
         ]
 
-    cpu_path = run_dir / "db_cpu.csv"
-    summary_path = run_dir / "db_cpu_summary.csv"
-    if cpu_path.is_file() and summary_path.is_file():
-        cpu = read_csv(cpu_path)
-        summary = next(iter(read_csv(summary_path)), None)
-        if summary:
-            lines += [
-                "#### PostgreSQL CPU",
-                "",
-                "100% means one fully used CPU core. The measured period is shown in the summary CSV.",
-                "",
-                "| Metric | Value |",
-                "|:--|--:|",
-                f"| Mean CPU | {number(summary, 'postgres_cpu_mean_pct', '%', 2)} |",
-                f"| Peak CPU | {number(summary, 'postgres_cpu_peak_pct', '%', 2)} |",
-                f"| CPU time | {number(summary, 'postgres_cpu_seconds', ' core-seconds', 2)} |",
-                f"| Duration | {number(summary, 'duration_s', ' s', 2)} |",
-                f"| Samples | {summary['samples']} |",
-                "",
+    postgres = read_postgres_samples(run_dir)
+    summary = summarize_postgres(postgres)
+    if summary:
+        lines += [
+            "#### PostgreSQL resources",
+            "",
+            "Samples cover the container service lifecycle. CPU 100% means one fully used core. PSS apportions shared memory across PostgreSQL processes.",
+            "",
+            "| Metric | Value |",
+            "|:--|--:|",
+            f"| Mean CPU | {number(summary, 'cpu_mean_pct', '%', 2)} |",
+            f"| Peak CPU | {number(summary, 'cpu_peak_pct', '%', 2)} |",
+            f"| CPU time | {number(summary, 'cpu_seconds', ' core-seconds', 2)} |",
+            f"| Mean PSS | {number(summary, 'pss_mean_mib', ' MiB', 2)} |",
+            f"| Peak PSS | {number(summary, 'pss_peak_mib', ' MiB', 2)} |",
+            f"| Duration | {number(summary, 'duration_s', ' s', 2)} |",
+            f"| Samples | {summary['samples']} |",
+            "",
+        ]
+        if postgres:
+            cpu_start = postgres[0]["timestamp_utc"].timestamp()
+            samples = [
+                (row["timestamp_utc"].timestamp() - cpu_start, row["cpu_pct"])
+                for row in postgres
+                if row["cpu_pct"] is not None
             ]
-            if cpu:
-                samples = [
-                    (float(row["elapsed_s"]), float(row["postgres_cpu_pct"]))
-                    for row in cpu
+            memory_samples = [
+                (row["timestamp_utc"].timestamp() - cpu_start, row["pss_bytes"] / 2**20)
+                for row in postgres
+                if row["pss_bytes"] is not None
+            ]
+            cpu_completed = []
+            cpu_starts = []
+            if completed_timestamps:
+                cpu_completed = [
+                    (max(0, timestamp - cpu_start), count)
+                    for timestamp, count in completed_timestamps
                 ]
-                cpu_completed = []
-                cpu_starts = []
-                if completed_timestamps and cpu[0].get("timestamp_utc"):
-                    cpu_start = (
-                        datetime.fromisoformat(cpu[0]["timestamp_utc"]).timestamp()
-                        - samples[0][0]
-                    )
-                    cpu_completed = [
-                        (max(0, timestamp - cpu_start), count)
-                        for timestamp, count in completed_timestamps
+                if starts is not None and start is not None:
+                    cpu_starts = [
+                        (start + second - cpu_start, count)
+                        for second, count in starts
+                        if start + second >= cpu_start
                     ]
-                    if starts is not None and start is not None:
-                        cpu_starts = [
-                            (start + second - cpu_start, count)
-                            for second, count in starts
-                            if start + second >= cpu_start
-                        ]
+            if samples:
                 chart(
                     run_dir / "report_db_cpu.svg",
                     "PostgreSQL CPU",
@@ -429,6 +439,121 @@ def prepare_run(run_dir, results_dir):
                         "",
                     ]
                 timeline += [f"![PostgreSQL CPU]({asset('report_db_cpu.svg')})", ""]
+            if memory_samples:
+                chart(
+                    run_dir / "report_db_memory.svg",
+                    "PostgreSQL memory",
+                    "PostgreSQL PSS (MiB)",
+                    memory_samples,
+                    "#e56b35",
+                )
+                timeline += [
+                    "#### PostgreSQL memory",
+                    "",
+                    f"![PostgreSQL memory]({asset('report_db_memory.svg')})",
+                    "",
+                ]
+
+    content_io = read_samples(run_dir, "content_io")
+    content_summary = summarize_content_io(content_io)
+    if content_summary:
+        lines += [
+            "#### Content-worker I/O",
+            "",
+            "Storage bytes are attributed by Linux to content-worker processes; they do not measure upstream or client network traffic. Totals approximate the observed counter changes after each worker's first sample.",
+            "",
+            "| Metric | Value |",
+            "|:--|--:|",
+            f"| Storage read | {number(content_summary, 'read_mib', ' MiB', 2)} |",
+            f"| Storage written | {number(content_summary, 'write_mib', ' MiB', 2)} |",
+            f"| Peak storage read rate | {number(content_summary, 'peak_read_mib_s', ' MiB/s', 2)} |",
+            f"| Peak storage write rate | {number(content_summary, 'peak_write_mib_s', ' MiB/s', 2)} |",
+            f"| Read syscalls | {content_summary['read_syscalls']:,} |",
+            f"| Write syscalls | {content_summary['write_syscalls']:,} |",
+            "",
+        ]
+        series = content_io_series(content_io)
+        origin = min(row["timestamp_utc"] for row in content_io)
+        origin_seconds = origin.timestamp()
+        io_completed = [
+            (max(0, timestamp - origin_seconds), count)
+            for timestamp, count in completed_timestamps
+        ]
+        io_starts = (
+            [
+                (start + second - origin_seconds, count)
+                for second, count in starts
+                if start + second >= origin_seconds
+            ]
+            if start is not None and starts is not None
+            else []
+        )
+        for key, title, color in (
+            ("read_mib_s", "Content-worker storage read", "#2563eb"),
+            ("write_mib_s", "Content-worker storage write", "#e56b35"),
+        ):
+            points = [
+                ((time - origin).total_seconds(), value) for time, value in series[key]
+            ]
+            filename = f"report_content_{key}.svg"
+            if chart(
+                run_dir / filename,
+                title,
+                "Storage I/O (MiB/s)",
+                points,
+                color,
+                minimum_y=0.01,
+                overlay=io_completed,
+                request_starts=io_starts,
+            ):
+                timeline += [f"#### {title}", ""]
+                if io_completed:
+                    timeline += [
+                        "Dashed gray shows cumulative completed requests; purple shows new requests per second. Both use their labeled right axes.",
+                        "",
+                    ]
+                timeline += [f"![{title}]({asset(filename)})", ""]
+
+    temp = read_samples(run_dir, "pulp_temp")
+    temp_summary = summarize_pulp_temp(temp)
+    if temp_summary:
+        lines += [
+            "#### Pulp temporary files",
+            "",
+            "The working directory is shared by content downloads, API uploads, and tasks. Peaks are sampled, so short-lived files may be missed.",
+            "",
+            "| Metric | Value |",
+            "|:--|--:|",
+            f"| Peak active files | {temp_summary['peak_files']:,} |",
+            f"| Peak apparent size | {number(temp_summary, 'peak_mib', ' MiB', 2)} |",
+            f"| Peak root-level size | {number(temp_summary, 'peak_root_mib', ' MiB', 2)} |",
+            f"| Peak allocated size | {number(temp_summary, 'peak_allocated_mib', ' MiB', 2)} |",
+            "",
+        ]
+        origin = temp[0]["timestamp_utc"]
+        for key, title, unit, color, scale in (
+            (
+                "active_bytes",
+                "Pulp temporary file size",
+                "Active files (MiB)",
+                "#16a34a",
+                MIB,
+            ),
+            (
+                "active_files",
+                "Pulp temporary file count",
+                "Active files (count)",
+                "#a855f7",
+                1,
+            ),
+        ):
+            points = [
+                ((row["timestamp_utc"] - origin).total_seconds(), row[key] / scale)
+                for row in temp
+            ]
+            filename = f"report_temp_{key}.svg"
+            if chart(run_dir / filename, title, unit, points, color):
+                timeline += [f"#### {title}", "", f"![{title}]({asset(filename)})", ""]
 
     task_summary, task_distribution, task_timeline = task_report_sections(
         run_dir, results_dir
@@ -445,14 +570,12 @@ def prepare_run(run_dir, results_dir):
         ("compose.log", "Compose service logs"),
         ("collector_error.txt", "Collector capture error"),
         ("collector_trigger_error.txt", "Triggered collector error"),
+        ("task_wait_error.txt", "Pulp task wait error"),
         ("collector_finalize_error.txt", "Collector finalization error"),
-        ("tasking.parquet", "Structured Pulp task records"),
         ("data_load.csv", "Requests selected for this run"),
         ("locust_stats.csv", "Locust summary CSV"),
         ("locust_stats_history.csv", "Locust history CSV"),
         ("requests.csv", "Individual requests CSV"),
-        ("db_cpu.csv", "PostgreSQL CPU samples"),
-        ("db_cpu_summary.csv", "PostgreSQL CPU summary"),
     ):
         if (run_dir / name).is_file():
             details.append(f"- [{label}]({asset(name)})")
@@ -496,7 +619,7 @@ def render_report(
     report = execution_dir / "report.html"
     if report.is_file():
         report_time = report.stat().st_mtime_ns
-        tasking_files = list(execution_dir.glob("*/*/*/tasking.parquet"))
+        tasking_files = list(execution_dir.glob("*/*/*/collectors/tasking.parquet"))
         source = execution_dir / "report.qmd"
         source_text = source.read_text() if source.is_file() else ""
         generated_source = (

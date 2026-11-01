@@ -144,13 +144,13 @@ class ComposeRuntime:
         return path
 
     def copy_collector_outputs(self, destination: Path) -> Path:
-        """Copy every collector's flushed CSV before removing the container."""
+        """Copy finalized collector output before removing the container."""
         destination.mkdir(parents=True, exist_ok=True)
         self.command(
             self.files,
             self.environment,
             "cp",
-            "pulp:/var/lib/pulp/juicer/.",
+            "pulp:/var/lib/pgsql/juicer/.",
             str(destination),
         )
         return destination
@@ -158,6 +158,14 @@ class ComposeRuntime:
     def trigger_collector(self, name: str, timeout_seconds: float = 15) -> str:
         """Ask the s6 collector to run a named job and await its reply."""
         return self._request_collector("collect", name, timeout_seconds)
+
+    def wait_for_tasks(self, timeout_seconds: float = 600) -> str:
+        """Wait for non-scheduled Pulp tasks to reach a terminal state."""
+        return self._request_collector("wait-tasks", None, timeout_seconds)
+
+    def wait_for_postgres_idle(self, timeout_seconds: float = 120) -> str:
+        """Wait for two consecutive PostgreSQL samples with zero CPU use."""
+        return self._request_collector("wait-postgres-idle", None, timeout_seconds)
 
     def finalize_collectors(self, timeout_seconds: float = 15) -> str:
         """Stop periodic sampling and wait until Parquet footers are written."""
@@ -179,6 +187,6 @@ class ComposeRuntime:
             "--timeout",
             str(timeout_seconds),
             capture=True,
-            timeout=timeout_seconds + 5,
+            timeout=timeout_seconds + (10 if command.startswith("wait-") else 5),
         )
         return result.stdout.strip()

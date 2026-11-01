@@ -1,3 +1,3 @@
 #!/usr/bin/execlineb -S0
-s6-setuidgid pulp
+with-contenv
 /usr/bin/python3 /usr/libexec/pulp-juicer/collector.py

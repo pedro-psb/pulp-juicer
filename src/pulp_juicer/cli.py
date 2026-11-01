@@ -163,6 +163,7 @@ def show_experiment(experiment_id):
 
 
 @cli.command("report")
+@click.argument("execution_id", required=False)
 @click.option(
     "--results",
     "results_dir",
@@ -173,37 +174,44 @@ def show_experiment(experiment_id):
 @click.option(
     "--quarto", "quarto_command", envvar="QUARTO", default="quarto", show_default=True
 )
-def report_results(results_dir, quarto_command):
-    """Render detailed and trial comparison reports per execution."""
+def report_results(execution_id, results_dir, quarto_command):
+    """Render one execution's reports, or all executions when omitted."""
     from pyarrow import ArrowException
-
-    from .tasking import analyze_execution_tasking
 
     new_reports = []
     existing_reports = []
     try:
-        if results_dir.is_dir():
-            for execution_dir in sorted(results_dir.iterdir()):
-                if not execution_dir.is_dir() or not re.fullmatch(
-                    r".+__\d{3,}", execution_dir.name
-                ):
-                    continue
-                analyze_execution_tasking(execution_dir)
-                for name, renderer in (
-                    ("report.html", render_report),
-                    ("trials.html", render_trial_report),
-                ):
-                    output = execution_dir / name
-                    previous_time = (
-                        output.stat().st_mtime_ns if output.is_file() else None
+        if execution_id is not None:
+            if Path(execution_id).name != execution_id or not re.fullmatch(
+                r".+__\d{3,}", execution_id
+            ):
+                raise click.ClickException(f"Invalid execution ID: {execution_id}")
+            selected = results_dir / execution_id
+            if not selected.is_dir():
+                raise click.ClickException(
+                    f"Execution not found: {execution_id} under {results_dir}"
+                )
+            executions = [selected]
+        else:
+            executions = sorted(results_dir.iterdir()) if results_dir.is_dir() else []
+        for execution_dir in executions:
+            if not execution_dir.is_dir() or not re.fullmatch(
+                r".+__\d{3,}", execution_dir.name
+            ):
+                continue
+            for name, renderer in (
+                ("report.html", render_report),
+                ("trials.html", render_trial_report),
+            ):
+                output = execution_dir / name
+                previous_time = output.stat().st_mtime_ns if output.is_file() else None
+                report = renderer(execution_dir, quarto_command)
+                if report is not None:
+                    unchanged = (
+                        previous_time is not None
+                        and output.stat().st_mtime_ns == previous_time
                     )
-                    report = renderer(execution_dir, quarto_command)
-                    if report is not None:
-                        unchanged = (
-                            previous_time is not None
-                            and output.stat().st_mtime_ns == previous_time
-                        )
-                        (existing_reports if unchanged else new_reports).append(report)
+                    (existing_reports if unchanged else new_reports).append(report)
     except (
         OSError,
         ValueError,

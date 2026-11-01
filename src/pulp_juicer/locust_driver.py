@@ -3,7 +3,6 @@
 import csv
 import hashlib
 import itertools
-import shlex
 import shutil
 import time
 from collections.abc import Callable
@@ -19,7 +18,6 @@ from locust.runners import STATE_CLEANUP, STATE_STOPPED, STATE_STOPPING
 from locust.stats import PERCENTILES_TO_REPORT, StatsCSV, StatsCSVFileWriter
 from locust.util.timespan import parse_timespan
 
-from .db_cpu_monitor import DBCpuMonitor
 from .plan import RunMetadata, RunResultMetadata
 from .types import StepFunctionLoad, UnitaryImpulseLoad
 
@@ -67,10 +65,6 @@ def run(
     *,
     on_progress: Callable[[str], None] | None = None,
     progress_interval_seconds: float = 5,
-    compose_command: tuple[str, ...] = ("docker", "compose"),
-    project: str = "pulp-juicer",
-    compose_file: Path | None = None,
-    monitor_cpu: bool = True,
 ) -> RunResultMetadata:
     """Execute one run and retain artifacts after all requests complete."""
     if metadata.driver != "http_get":
@@ -87,10 +81,6 @@ def run(
             result = _run_created(
                 metadata,
                 request_input,
-                compose_command=compose_command,
-                project=project,
-                compose_file=compose_file,
-                monitor_cpu=monitor_cpu,
                 on_progress=on_progress,
                 progress_interval_seconds=progress_interval_seconds,
             )
@@ -115,10 +105,6 @@ def _run_created(
     metadata: RunMetadata,
     request_input: dict,
     *,
-    compose_command: tuple[str, ...],
-    project: str,
-    compose_file: Path | None,
-    monitor_cpu: bool,
     on_progress: Callable[[str], None] | None,
     progress_interval_seconds: float,
 ) -> RunResultMetadata:
@@ -149,7 +135,6 @@ def _run_created(
     load_start_utc = None
     timeout = parse_timespan(metadata.load.max_duration)
     deadline = None
-    cpu = None
     progress_greenlet = None
     step_greenlet = None
 
@@ -236,16 +221,6 @@ def _run_created(
     events = Events()
     environment = Environment(user_classes=[RequestUser], events=events)
     runner = environment.create_local_runner()
-    cpu = (
-        DBCpuMonitor(
-            output / "db_cpu.csv",
-            shlex.join(compose_command),
-            project,
-            str(compose_file) if compose_file else "compose.yaml",
-        )
-        if monitor_cpu
-        else None
-    )
 
     def count_request(request_type, **kwargs):
         nonlocal completed
@@ -307,8 +282,6 @@ def _run_created(
         )
         csv_greenlet = None
         try:
-            if cpu:
-                cpu.start()
             csv_greenlet = gevent.spawn(csv_writer.stats_writer)
             if on_progress:
                 action = (
@@ -319,8 +292,6 @@ def _run_created(
                 on_progress(
                     f"Locust: {action} {metadata.load.users} users for {len(requests)} requests"
                 )
-            if metadata.load.idle_before_seconds:
-                gevent.sleep(metadata.load.idle_before_seconds)
             deadline = gevent.spawn_later(timeout, stop_at_deadline)
             if on_progress:
                 on_progress("Load test starting")
@@ -344,8 +315,6 @@ def _run_created(
             deadline.kill()
             deadline = None
             report_stats()
-            if metadata.load.tail_after_seconds:
-                gevent.sleep(metadata.load.tail_after_seconds)
         finally:
             if deadline is not None:
                 deadline.kill()
@@ -363,11 +332,7 @@ def _run_created(
                         csv_writer.stats_history_csv_writer, time.time()
                     )
                 finally:
-                    try:
-                        csv_writer.close_files()
-                    finally:
-                        if cpu:
-                            cpu.stop()
+                    csv_writer.close_files()
 
     stats = StatsCSV(environment, PERCENTILES_TO_REPORT)
     for name, method in (

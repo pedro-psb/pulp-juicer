@@ -102,8 +102,6 @@ class UnitaryImpulseLoad:
     request_count: int
     max_duration: str = "5m"
     wait_seconds: float = 0
-    idle_before_seconds: float = 5
-    tail_after_seconds: float = 5
     request_timeout_seconds: float = 60
 
     def __post_init__(self):
@@ -130,8 +128,6 @@ class StepFunctionLoad:
     steps: tuple[LoadStep, ...]
     max_duration: str = "5m"
     wait_seconds: float = 0
-    idle_before_seconds: float = 5
-    tail_after_seconds: float = 5
     request_timeout_seconds: float = 60
     request_count: int | None = None
 

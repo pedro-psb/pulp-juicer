@@ -87,8 +87,6 @@ class TestLocustLifecycle(unittest.TestCase):
                     StepFunctionLoad(
                         steps=(LoadStep(0, 0), LoadStep(0.05, 1)),
                         max_duration="2s",
-                        idle_before_seconds=0,
-                        tail_after_seconds=0,
                     ),
                     "http_get",
                     lambda *args: {},
@@ -101,7 +99,6 @@ class TestLocustLifecycle(unittest.TestCase):
                         "requests": [{"path": "artifact"}],
                     },
                     lambda: None,
-                    monitor_cpu=False,
                 )
                 self.assertEqual(result.completed_requests, 1)
                 self.assertFalse(result.timed_out)
@@ -136,8 +133,6 @@ class TestLocustLifecycle(unittest.TestCase):
                     UnitaryImpulseLoad(
                         request_count=1,
                         max_duration="5s",
-                        idle_before_seconds=0,
-                        tail_after_seconds=0,
                     ),
                     "http_get",
                     lambda *args: {},
@@ -150,7 +145,6 @@ class TestLocustLifecycle(unittest.TestCase):
                         "requests": [{"path": "broken", "expected_status": 200}],
                     },
                     lambda: None,
-                    monitor_cpu=False,
                 )
                 self.assertEqual(result.failures, 1)
                 self.assertEqual(result.completed_requests, 1)
@@ -216,8 +210,6 @@ class TestLocustLifecycle(unittest.TestCase):
                     UnitaryImpulseLoad(
                         request_count=2,
                         max_duration="10s",
-                        idle_before_seconds=0,
-                        tail_after_seconds=0,
                     ),
                     "http_get",
                     lambda *args: {},
@@ -255,7 +247,6 @@ class TestLocustLifecycle(unittest.TestCase):
                     metadata,
                     start,
                     stop,
-                    monitor_cpu=False,
                     on_progress=progress.append,
                     progress_interval_seconds=0.05,
                 )
@@ -306,8 +297,6 @@ class TestLocustLifecycle(unittest.TestCase):
                 UnitaryImpulseLoad(
                     request_count=1,
                     max_duration="2s",
-                    idle_before_seconds=0,
-                    tail_after_seconds=0,
                 ),
                 "http_get",
                 lambda *args: {},
@@ -324,7 +313,7 @@ class TestLocustLifecycle(unittest.TestCase):
                 ) as create,
                 self.assertRaisesRegex(ValueError, "setup failed"),
             ):
-                run(metadata, start, lambda: events.append("stop"), monitor_cpu=False)
+                run(metadata, start, lambda: events.append("stop"))
             create.assert_not_called()
             self.assertEqual(events, ["start", "stop"])
             self.assertFalse(metadata.result_dir.exists())
@@ -353,7 +342,7 @@ class TestLocustLifecycle(unittest.TestCase):
                 (output / "compose.log").write_text("pulp | startup error\n")
 
             with self.assertRaisesRegex(ValueError, "setup failed"):
-                run(metadata, start, stop, monitor_cpu=False)
+                run(metadata, start, stop)
 
             self.assertEqual([path.name for path in output.iterdir()], ["compose.log"])
             self.assertEqual(

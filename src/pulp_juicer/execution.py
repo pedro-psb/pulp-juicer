@@ -119,8 +119,6 @@ def _write_run_context(
             else None,
             "duration": run.load.max_duration,
             "wait_seconds": run.load.wait_seconds,
-            "idle_seconds": run.load.idle_before_seconds,
-            "tail_seconds": run.load.tail_after_seconds,
             "request_timeout_seconds": run.load.request_timeout_seconds,
             "request_count": run.load.request_count,
             "steps": [asdict(step) for step in run.load.steps]
@@ -160,7 +158,6 @@ def _write_pulp_status(connection, result_dir: Path) -> Path:
 def execute_test_plan(
     plan: TestPlanMetadata,
     *,
-    monitor_cpu: bool = True,
     force: bool = False,
     post_debug: bool = False,
     on_skip: Callable[[RunMetadata], None] | None = None,
@@ -263,6 +260,11 @@ def execute_test_plan(
                     run.fixtures, candidate_data, run.load
                 )
                 if on_progress:
+                    on_progress("Waiting for PostgreSQL CPU to become idle")
+                response = runtime.wait_for_postgres_idle()
+                if on_progress:
+                    on_progress(f"PostgreSQL idle: {response}")
+                if on_progress:
                     on_progress("Pre-test hooks finished")
                 return request_input
 
@@ -290,9 +292,32 @@ def execute_test_plan(
                     try:
                         if runtime.started:
                             if on_progress:
-                                on_progress("Triggering random collector")
+                                on_progress("Waiting for Pulp tasks to finish")
                             try:
-                                response = runtime.trigger_collector("random")
+                                response = runtime.wait_for_tasks()
+                            except (
+                                OSError,
+                                subprocess.CalledProcessError,
+                                subprocess.TimeoutExpired,
+                            ) as exc:
+                                detail = f"{type(exc).__name__}: {exc}"
+                                if (
+                                    isinstance(exc, subprocess.CalledProcessError)
+                                    and exc.stderr
+                                ):
+                                    detail += f"\n{exc.stderr.strip()}"
+                                (run.result_dir / "task_wait_error.txt").write_text(
+                                    detail + "\n"
+                                )
+                                if on_progress:
+                                    on_progress(f"Pulp task wait failed: {exc}")
+                            else:
+                                if on_progress:
+                                    on_progress(f"Pulp tasks finished: {response}")
+                            if on_progress:
+                                on_progress("Capturing Pulp tasks from the database")
+                            try:
+                                response = runtime.trigger_collector("tasking")
                             except (
                                 OSError,
                                 subprocess.CalledProcessError,
@@ -308,12 +333,10 @@ def execute_test_plan(
                                     run.result_dir / "collector_trigger_error.txt"
                                 ).write_text(detail + "\n")
                                 if on_progress:
-                                    on_progress(f"Random collector failed: {exc}")
+                                    on_progress(f"Task collector failed: {exc}")
                             else:
                                 if on_progress:
-                                    on_progress(
-                                        f"Random collector finished: {response}"
-                                    )
+                                    on_progress(f"Task collector finished: {response}")
                             if on_progress:
                                 on_progress("Finalizing periodic collectors")
                             try:
@@ -372,10 +395,6 @@ def execute_test_plan(
                 run,
                 start_run,
                 stop_run,
-                compose_command=plan.compose_command,
-                project=runtime.project,
-                compose_file=plan.compose_file,
-                monitor_cpu=monitor_cpu,
                 on_progress=on_progress,
             )
             if (

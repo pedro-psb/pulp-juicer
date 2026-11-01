@@ -7,6 +7,7 @@ dependencies = [
     "locust",
     "packaging",
     "pyarrow>=18",
+    "psutil>=7,<8",
     "rich>=15.0.0",
     "rpm-rs==0.30.2",
 ]

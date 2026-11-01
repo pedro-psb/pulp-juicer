@@ -8,9 +8,9 @@ RUN --mount=type=cache,id=pulp-juicer-rpm-uv,target=/root/.cache/uv \
 
 FROM pulp/pulp-ci-centos10:${BASE_TAG}
 
-COPY --from=collector-builder /tmp/collector/pulp-juicer-collector-0.4.0-1.noarch.rpm /tmp/
-RUN rpm -i /tmp/pulp-juicer-collector-0.4.0-1.noarch.rpm && \
-    rm /tmp/pulp-juicer-collector-0.4.0-1.noarch.rpm
+COPY --from=collector-builder /tmp/collector/pulp-juicer-collector-0.8.0-1.noarch.rpm /tmp/
+RUN rpm -i /tmp/pulp-juicer-collector-0.8.0-1.noarch.rpm && \
+    rm /tmp/pulp-juicer-collector-0.8.0-1.noarch.rpm
 
 # Compose provides each checked-out repository as a named build context.
 COPY --from=pulpcore_src / /opt/pulp-sources/pulpcore/
@@ -22,6 +22,7 @@ RUN --mount=type=cache,id=bucket-loadtest-uv,target=/root/.cache/uv \
       /opt/pulp-sources/pulpcore \
       /opt/pulp-sources/pulp_maven \
       pyarrow==26.0.0 \
+      psutil==7.2.2 \
       -c /constraints.txt
 
 USER pulp:pulp

@@ -6,7 +6,7 @@ from pathlib import Path
 from rpm_rs import FileOptions, PackageBuilder
 
 PACKAGE_NAME = "pulp-juicer-collector"
-VERSION = "0.4.0"
+VERSION = "0.8.0"
 RELEASE = "1"
 SOURCE_DIR = Path(__file__).resolve().parent
 
@@ -22,6 +22,32 @@ def build(output_dir: Path) -> Path:
         str(SOURCE_DIR / "collector.py"),
         FileOptions.new("/usr/libexec/pulp-juicer/collector.py", permissions=0o644),
     )
+    package.with_file(
+        str(SOURCE_DIR / "postgres.py"),
+        FileOptions.new("/usr/libexec/pulp-juicer/postgres.py", permissions=0o644),
+    )
+    package.with_file(
+        str(SOURCE_DIR / "components.py"),
+        FileOptions.new("/usr/libexec/pulp-juicer/components.py", permissions=0o644),
+    )
+    package.with_file(
+        str(SOURCE_DIR / "postgres_snapshot.py"),
+        FileOptions.new(
+            "/usr/libexec/pulp-juicer/postgres_snapshot.py", permissions=0o644
+        ),
+    )
+    for module in (
+        "content_io",
+        "content_io_snapshot",
+        "content_temp",
+        "task_db",
+        "task_wait",
+        "postgres_wait",
+    ):
+        package.with_file(
+            str(SOURCE_DIR / f"{module}.py"),
+            FileOptions.new(f"/usr/libexec/pulp-juicer/{module}.py", permissions=0o644),
+        )
     package.with_file(
         str(SOURCE_DIR / "control.py"),
         FileOptions.new("/usr/libexec/pulp-juicer/control.py", permissions=0o644),
