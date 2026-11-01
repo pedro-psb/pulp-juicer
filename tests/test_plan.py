@@ -344,7 +344,7 @@ class TestCli(unittest.TestCase):
         run_without_experiment = runner.invoke(cli, ["squeeze"])
         self.assertEqual(run_without_experiment.exit_code, 2)
         self.assertIn(
-            "maven-pull-through: Compare Maven pull-through candidates under two load patterns.",
+            "maven-pull-through: Compare Maven pull-through and upload candidates under load.",
             run_without_experiment.output,
         )
         self.assertNotIn("  burst:", run_without_experiment.output)
@@ -357,7 +357,7 @@ class TestCli(unittest.TestCase):
         )
         self.assertNotIn("Usage:", run_without_experiment.output)
         self.assertIn(
-            "maven-pull-through: Compare Maven pull-through candidates under two load patterns.",
+            "maven-pull-through: Compare Maven pull-through and upload candidates under load.",
             listed.output,
         )
         self.assertIn(
@@ -380,7 +380,7 @@ class TestCli(unittest.TestCase):
         )
         self.assertIn("Available experiments:\n", shown_without_experiment.output)
         self.assertIn(
-            "maven-pull-through: Compare Maven pull-through candidates under two load patterns.",
+            "maven-pull-through: Compare Maven pull-through and upload candidates under load.",
             shown_without_experiment.output,
         )
         self.assertIn(
@@ -393,7 +393,7 @@ class TestCli(unittest.TestCase):
         shown = runner.invoke(cli, ["show", "maven-pull-through"])
         self.assertEqual(shown.exit_code, 0, shown.output)
         self.assertNotIn(
-            "Compare Maven pull-through candidates under two load patterns.",
+            "Compare Maven pull-through and upload candidates under load.",
             shown.output,
         )
         self.assertIn("response time and request completion", shown.output)

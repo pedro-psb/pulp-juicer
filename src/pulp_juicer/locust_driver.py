@@ -67,7 +67,7 @@ def run(
     progress_interval_seconds: float = 5,
 ) -> RunResultMetadata:
     """Execute one run and retain artifacts after all requests complete."""
-    if metadata.driver != "http_get":
+    if metadata.driver not in {"http_get", "http_upload"}:
         raise NotImplementedError(f"Unsupported driver: {metadata.driver}")
 
     output = metadata.result_dir
@@ -113,16 +113,36 @@ def _run_created(
     base_url = request_input["base_url"].rstrip("/")
     requests = tuple(request_input["requests"])
     if not base_url or not requests:
-        raise ValueError("http_get input needs a base_url and at least one request")
+        raise ValueError("HTTP input needs a base_url and at least one request")
+    if metadata.driver == "http_upload":
+        auth = request_input.get("auth")
+        if not isinstance(auth, tuple) or len(auth) != 2:
+            raise ValueError("HTTP upload requires Pulp credentials")
+        for item in requests:
+            if not Path(item["file_path"]).is_file():
+                raise ValueError(f"Upload file is missing: {item['file_path']}")
     if (
         isinstance(metadata.load, UnitaryImpulseLoad)
         and len(requests) != metadata.load.request_count
     ):
         raise ValueError("Impulse request count must match the generated request list")
+    modify_repository = request_input.get("modify_repository")
+    if modify_repository and metadata.driver != "http_upload":
+        raise ValueError("Repository modify requires HTTP uploads")
+    modify_path = (
+        f"{modify_repository.strip('/')}/modify/" if modify_repository else None
+    )
+    expected_requests = len(requests) + bool(modify_repository)
     wait_seconds = float(request_input.get("wait_seconds", metadata.load.wait_seconds))
     state = {
         "base_url": base_url,
         "requests": requests,
+        "auth": request_input.get("auth"),
+        "upload_payloads": tuple(
+            Path(item["file_path"]).read_bytes() for item in requests
+        )
+        if metadata.driver == "http_upload"
+        else (),
         "request_timeout": float(
             request_input.get(
                 "request_timeout_seconds", metadata.load.request_timeout_seconds
@@ -131,6 +151,8 @@ def _run_created(
     }
     indices = itertools.count()
     completed = 0
+    uploads_finished = 0
+    uploaded_hrefs = [None] * len(requests)
     timed_out = False
     load_start_utc = None
     timeout = parse_timespan(metadata.load.max_duration)
@@ -143,7 +165,7 @@ def _run_created(
             return
         total = environment.stats.total
         on_progress(
-            f"Locust: {total.num_requests}/{len(state['requests'])} requests, "
+            f"Locust: {total.num_requests}/{expected_requests} requests, "
             f"{total.num_failures} failures, {runner.user_count} users, "
             f"{total.current_rps:.1f} req/s"
         )
@@ -159,29 +181,82 @@ def _run_created(
 
         @task
         def fetch(self):
+            nonlocal uploads_finished
             requests = state["requests"]
             index = next(indices)
             if index >= len(requests):
                 raise StopUser()
             item = requests[index]
             path = item["path"]
-            with self.client.get(
-                f"{state['base_url']}/{path}",
-                name=item.get("name", "http_get"),
-                context={"artifact_path": path},
-                catch_response=True,
-                timeout=state["request_timeout"],
-            ) as response:
+            artifact_path = item.get("relative_path", path)
+            if metadata.driver == "http_upload":
+                upload_data = {"relative_path": artifact_path}
+                if "repository" in item:
+                    upload_data["repository"] = item["repository"]
+                response_context = self.client.post(
+                    f"{state['base_url']}/{path}",
+                    name=item.get("name", "http_upload"),
+                    context={"artifact_path": artifact_path},
+                    catch_response=True,
+                    timeout=state["request_timeout"],
+                    auth=state["auth"],
+                    data=upload_data,
+                    files={
+                        "file": (
+                            Path(item["file_path"]).name,
+                            state["upload_payloads"][index],
+                        )
+                    },
+                )
+            else:
+                response_context = self.client.get(
+                    f"{state['base_url']}/{path}",
+                    name=item.get("name", "http_get"),
+                    context={"artifact_path": artifact_path},
+                    catch_response=True,
+                    timeout=state["request_timeout"],
+                )
+            with response_context as response:
                 expected = int(item.get("expected_status", 200))
                 if response.status_code != expected:
                     response.failure(
-                        f"HTTP {response.status_code}, expected {expected}: {path}"
+                        f"HTTP {response.status_code}, expected {expected}: {artifact_path}"
                     )
+                elif metadata.driver == "http_upload" and modify_repository:
+                    try:
+                        href = response.json()["pulp_href"]
+                    except (ValueError, KeyError, TypeError):
+                        response.failure(
+                            f"Upload returned no content HREF: {artifact_path}"
+                        )
+                    else:
+                        uploaded_hrefs[index] = href
                 elif (
                     "sha256" in item
                     and hashlib.sha256(response.content).hexdigest() != item["sha256"]
                 ):
-                    response.failure(f"SHA256 mismatch: {path}")
+                    response.failure(f"SHA256 mismatch: {artifact_path}")
+            if metadata.driver == "http_upload":
+                uploads_finished += 1
+                if modify_path and uploads_finished == len(requests):
+                    with self.client.post(
+                        f"{state['base_url']}/{modify_path}",
+                        name="maven-modify",
+                        context={"artifact_path": modify_repository},
+                        catch_response=True,
+                        timeout=state["request_timeout"],
+                        auth=state["auth"],
+                        json={
+                            "add_content_units": [
+                                href for href in uploaded_hrefs if href is not None
+                            ]
+                        },
+                    ) as response:
+                        if response.status_code != 202:
+                            response.failure(
+                                f"HTTP {response.status_code}, expected 202: "
+                                f"{modify_path}"
+                            )
             if isinstance(metadata.load, UnitaryImpulseLoad):
                 raise StopUser()
 
@@ -203,6 +278,10 @@ def _run_created(
                 "sha256",
                 "wait_seconds",
                 "request_timeout_seconds",
+                "method",
+                "relative_path",
+                "file_path",
+                "repository",
             )
         )
         for item in requests:
@@ -210,11 +289,31 @@ def _run_created(
                 (
                     item["path"],
                     f"{base_url}/{item['path']}",
-                    item.get("name", "http_get"),
+                    item.get("name", metadata.driver),
                     item.get("expected_status", 200),
                     item.get("sha256", ""),
                     wait_seconds,
                     state["request_timeout"],
+                    "POST" if metadata.driver == "http_upload" else "GET",
+                    item.get("relative_path", ""),
+                    item.get("file_path", ""),
+                    item.get("repository", ""),
+                )
+            )
+        if modify_path:
+            data_writer.writerow(
+                (
+                    modify_path,
+                    f"{base_url}/{modify_path}",
+                    "maven-modify",
+                    202,
+                    "",
+                    wait_seconds,
+                    state["request_timeout"],
+                    "POST",
+                    "",
+                    "",
+                    modify_repository,
                 )
             )
 
@@ -224,9 +323,9 @@ def _run_created(
 
     def count_request(request_type, **kwargs):
         nonlocal completed
-        if request_type == "GET":
+        if request_type == ("POST" if metadata.driver == "http_upload" else "GET"):
             completed += 1
-            if completed >= len(state["requests"]):
+            if completed >= expected_requests:
                 gevent.spawn(runner.quit)
 
     events.request.add_listener(count_request)
@@ -258,7 +357,7 @@ def _run_created(
             response_length,
             **kwargs,
         ):
-            if request_type != "GET":
+            if request_type != ("POST" if metadata.driver == "http_upload" else "GET"):
                 return
             request_writer.writerow(
                 (
@@ -351,7 +450,7 @@ def _run_created(
         candidate_name=metadata.candidate.name,
         run_id=metadata.run_id,
         result_dir=output,
-        expected_requests=len(state["requests"]),
+        expected_requests=expected_requests,
         completed_requests=total.num_requests,
         failures=total.num_failures,
         mean_response_ms=total.avg_response_time,

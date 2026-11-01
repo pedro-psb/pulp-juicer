@@ -1,4 +1,4 @@
-# Maven pull-through experiment
+# Maven pull-through and upload experiment
 
 `experiment.py` defines fixture instances, candidates, scenarios, and run order.
 Candidate IDs are positive integers.
@@ -6,6 +6,7 @@ Each scenario uses its own `request_count`, which may be less than the fixture c
 Each candidate has a short description shown by `pulp-juicer show maven-pull-through`.
 `UnitaryImpulseLoad(request_count=N)` starts N users, each making one request. `StepFunctionLoad` changes the target user count at each `LoadStep(at_seconds, users)` and derives a spawn rate for each change. Burst and temporary scenarios currently have one step, preserving their user targets and request counts. Duration, waits, and timeouts use profile defaults.
 The burst scenario runs normal and staging twice. Pulp volumes are reset before every run; generated fixture data remains on disk.
+The `upload-impulse` scenario reuses those JAR files for 100 concurrent multipart POSTs to Maven's synchronous upload endpoint. Each request includes a unique `relative_path`. Staging uploads include the repository so Pulp stages each content unit; normal uploads collect the returned content HREFs and end with one repository modify request that adds them all. HTTP Basic credentials are supplied only at execution time.
 
 ## Candidate sources
 
@@ -31,7 +32,7 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 
 The Containerfile builds and installs the collector RPM with `rpm-rs` and installs PyArrow and psutil into the image with `uv`. To build the RPM outside Docker for inspection, run `uv run --locked python src/pulp_juicer/collector/build_rpm.py _juice/rpm` from the repository root.
 
-After pre-test setup, the runner asks the collector to wait up to 2 minutes for two consecutive one-second PostgreSQL CPU samples at zero before starting Locust. After load generation stops, it waits up to 10 minutes for Pulp tasks to reach a final state, excluding scheduled tasks. It then snapshots all task rows and finalizes the periodic collectors. If the task wait times out or fails, it saves `task_wait_error.txt` in the run directory and continues capturing results.
+After pre-test setup, the runner asks the collector to wait up to 2 minutes for two consecutive one-second PostgreSQL CPU samples at zero before starting Locust. After load generation stops, it waits up to 10 minutes for Pulp tasks to reach a final state, excluding scheduled tasks. Both waits report an initial sample and updates every 5 seconds to the CLI and execution log. It then snapshots all task rows and finalizes the periodic collectors. If the task wait times out or fails, it saves `task_wait_error.txt` in the run directory and continues capturing results.
 
 Each scenario declares its fixture dependencies with `RequireFixture(name, args)`.
 The runner resolves each `RequireFixture` by name and passes its `args` as keyword arguments to the concrete fixture constructor, along with `name` and `output_dir`.
@@ -44,7 +45,7 @@ The Maven fixture writes its artifact manifest into its output directory; scenar
 
 Each candidate declares a list of `PreTestFunction(description, setup_fn)` records. The runner calls each function after starting Pulp, passing a `PulpConnection`, required fixture metadata by name, and a unique run ID. The returned mappings are combined for the scenario input function.
 The Maven setup function uses the library Pulp client to create the remote, repository, and distribution, then returns their references and the distribution base URL.
-The scenario input function reads the required fixture's manifest, selects unique paths up to `request_count`, and returns requests for the infrastructure `http_get` driver.
+The scenario input functions read the required fixture's manifest and select unique paths up to `request_count`. Pull-through uses the `http_get` driver; upload uses `http_upload` with the same artifact files.
 The experiment modules do not import Locust.
 
 ## Test plan and CLI

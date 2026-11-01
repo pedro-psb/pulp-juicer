@@ -129,6 +129,27 @@ COLLECTORS = (
 TRIGGERED_COLLECTORS = {"tasking": collect_tasks}
 
 
+async def _stream_wait(writer, command, wait, timeout_seconds):
+    """Forward worker-thread samples while keeping one terminal reply."""
+    queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def progress(details):
+        loop.call_soon_threadsafe(queue.put_nowait, details)
+
+    pending = asyncio.create_task(wait(timeout_seconds, progress))
+    pending.add_done_callback(lambda _: queue.put_nowait(None))
+    while (details := await queue.get()) is not None:
+        writer.write(
+            json.dumps(
+                {"status": "progress", "command": command, "details": details}
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+    return await pending
+
+
 async def handle_control(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -149,12 +170,20 @@ async def handle_control(
             response = {"status": "finished", "collector": name}
         elif command == "wait-tasks":
             async with lock:
-                counts = await wait_for_tasks_async(float(request["timeout_seconds"]))
+                counts = await _stream_wait(
+                    writer,
+                    command,
+                    wait_for_tasks_async,
+                    float(request["timeout_seconds"]),
+                )
             response = {"status": "finished", "command": command, "active": counts}
         elif command == "wait-postgres-idle":
             async with lock:
-                sample = await wait_for_postgres_idle_async(
-                    float(request["timeout_seconds"])
+                sample = await _stream_wait(
+                    writer,
+                    command,
+                    wait_for_postgres_idle_async,
+                    float(request["timeout_seconds"]),
                 )
             response = {"status": "finished", "command": command, "sample": sample}
         elif command == "finalize":

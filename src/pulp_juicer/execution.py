@@ -259,9 +259,28 @@ def execute_test_plan(
                 request_input = run.input_builder(
                     run.fixtures, candidate_data, run.load
                 )
+                if run.driver == "http_upload":
+                    request_input["auth"] = (
+                        plan.pulp_connection.username,
+                        plan.pulp_connection.password,
+                    )
                 if on_progress:
                     on_progress("Waiting for PostgreSQL CPU to become idle")
-                response = runtime.wait_for_postgres_idle()
+
+                def postgres_progress(details):
+                    if on_progress:
+                        cpu = details.get("cpu_pct")
+                        cpu_text = f"{cpu:.1f}%" if cpu is not None else "N/A"
+                        on_progress(
+                            "PostgreSQL readiness: "
+                            f"CPU {cpu_text}, {details['processes']} processes, "
+                            f"quiet {details['quiet_samples']}/2 "
+                            f"({details['elapsed_seconds']}s elapsed)"
+                        )
+
+                response = runtime.wait_for_postgres_idle(
+                    on_progress=postgres_progress if on_progress else None
+                )
                 if on_progress:
                     on_progress(f"PostgreSQL idle: {response}")
                 if on_progress:
@@ -293,10 +312,26 @@ def execute_test_plan(
                         if runtime.started:
                             if on_progress:
                                 on_progress("Waiting for Pulp tasks to finish")
+
+                            def task_progress(details):
+                                if on_progress:
+                                    on_progress(
+                                        "Pulp tasks: "
+                                        f"{details['waiting']} waiting, "
+                                        f"{details['running']} running, "
+                                        f"{details['canceling']} canceling, "
+                                        f"{details['completed']} completed, "
+                                        f"{details['failed']} failed "
+                                        f"({details['elapsed_seconds']}s elapsed)"
+                                    )
+
                             try:
-                                response = runtime.wait_for_tasks()
+                                response = runtime.wait_for_tasks(
+                                    on_progress=task_progress if on_progress else None
+                                )
                             except (
                                 OSError,
+                                RuntimeError,
                                 subprocess.CalledProcessError,
                                 subprocess.TimeoutExpired,
                             ) as exc:

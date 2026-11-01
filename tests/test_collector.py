@@ -1,6 +1,7 @@
 """Parquet collector output and control replies."""
 
 import asyncio
+import io
 import json
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from pulp_juicer.collector.collector import (
 )
 from pulp_juicer.collector.content_io import ContentIOSampler
 from pulp_juicer.collector.content_temp import PulpTempSampler
+from pulp_juicer.collector.control import request as control_request
 from pulp_juicer.collector.postgres import PostgresSampler
 from pulp_juicer.collector.postgres_snapshot import snapshot
 from pulp_juicer.collector.postgres_wait import wait_for_postgres_idle
@@ -45,7 +47,7 @@ class Writer:
         pass
 
 
-async def send_request(directory, payload, stop=None, tasks=None):
+async def send_request(directory, payload, stop=None, tasks=None, return_all=False):
     reader = asyncio.StreamReader()
     reader.feed_data(json.dumps(payload).encode() + b"\n")
     reader.feed_eof()
@@ -58,28 +60,57 @@ async def send_request(directory, payload, stop=None, tasks=None):
         stop or asyncio.Event(),
         tasks or [],
     )
-    return json.loads(writer.data)
+    responses = [json.loads(line) for line in writer.data.splitlines()]
+    return responses if return_all else responses[-1]
 
 
 class TestCollectors(unittest.TestCase):
+    def test_control_client_forwards_progress_before_final_reply(self):
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.makefile.return_value = io.BytesIO(
+            b'{"status":"progress","details":{"waiting":2}}\n'
+            b'{"status":"finished","active":{}}\n'
+        )
+        progress = []
+        with patch(
+            "pulp_juicer.collector.control.socket.socket", return_value=connection
+        ):
+            result = control_request(
+                "wait-tasks", None, "/tmp/collector.sock", 10, progress.append
+            )
+        self.assertEqual(progress, [{"status": "progress", "details": {"waiting": 2}}])
+        self.assertEqual(result, {"status": "finished", "active": {}})
+
     def test_postgres_wait_requires_two_quiet_samples(self):
         sampler = SimpleNamespace(
             sample=MagicMock(
                 side_effect=[
-                    {"processes": 2, "cpu_seconds": None},
-                    {"processes": 2, "cpu_seconds": 0},
-                    {"processes": 2, "cpu_seconds": 0.01},
-                    {"processes": 2, "cpu_seconds": 0},
-                    {"processes": 2, "cpu_seconds": 0},
+                    {"processes": 2, "cpu_seconds": None, "cpu_pct": None},
+                    {"processes": 2, "cpu_seconds": 0, "cpu_pct": 0},
+                    {"processes": 2, "cpu_seconds": 0.01, "cpu_pct": 1},
+                    {"processes": 2, "cpu_seconds": 0, "cpu_pct": 0},
+                    {"processes": 2, "cpu_seconds": 0, "cpu_pct": 0},
                 ]
             )
         )
-        with patch("pulp_juicer.collector.postgres_wait.time.sleep"):
+        progress = []
+        with (
+            patch("pulp_juicer.collector.postgres_wait.time.sleep"),
+            patch(
+                "pulp_juicer.collector.postgres_wait.time.monotonic",
+                side_effect=[0, 0, 1, 5, 6],
+            ),
+        ):
             self.assertEqual(
-                wait_for_postgres_idle(10, sampler),
-                {"processes": 2, "cpu_seconds": 0},
+                wait_for_postgres_idle(10, sampler, progress.append),
+                {"processes": 2, "cpu_seconds": 0, "cpu_pct": 0},
             )
         self.assertEqual(sampler.sample.call_count, 5)
+        self.assertEqual(progress[0]["quiet_samples"], 0)
+        self.assertEqual(progress[0]["processes"], 2)
+        self.assertEqual(len(progress), 2)
+        self.assertEqual(progress[1]["cpu_pct"], 1)
 
     def test_postgres_wait_times_out_if_process_is_unavailable(self):
         sampler = SimpleNamespace(
@@ -97,6 +128,10 @@ class TestCollectors(unittest.TestCase):
         with (
             patch.dict("sys.modules", {"psycopg": SimpleNamespace(connect=connect)}),
             patch("pulp_juicer.collector.task_wait.time.sleep") as sleep,
+            patch(
+                "pulp_juicer.collector.task_wait.time.monotonic",
+                side_effect=[0, 0, 5, 6],
+            ),
         ):
             cursor = connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
             cursor.fetchall.side_effect = [
@@ -104,8 +139,13 @@ class TestCollectors(unittest.TestCase):
                 [("running", 1)],
                 [],
             ]
-            self.assertEqual(wait_for_tasks(10, components), {})
+            progress = []
+            self.assertEqual(wait_for_tasks(10, components, progress.append), {})
             self.assertEqual(cursor.execute.call_count, 3)
+            self.assertEqual(progress[0]["waiting"], 2)
+            self.assertEqual(progress[0]["running"], 1)
+            self.assertEqual(len(progress), 2)
+            self.assertEqual(progress[1]["waiting"], 0)
             sleep.assert_called()
             self.assertIn("core_task", cursor.execute.call_args.args[0])
             self.assertIn("core_taskschedule", cursor.execute.call_args.args[0])
@@ -316,38 +356,61 @@ class TestCollectors(unittest.TestCase):
             )
 
     def test_task_wait_control_reply(self):
+        async def wait_tasks(timeout, progress):
+            progress({"waiting": 2, "running": 1})
+            return {}
+
         with tempfile.TemporaryDirectory() as tmp:
             with patch(
-                "pulp_juicer.collector.collector.wait_for_tasks_async", return_value={}
+                "pulp_juicer.collector.collector.wait_for_tasks_async",
+                side_effect=wait_tasks,
             ) as wait:
-                response = asyncio.run(
+                responses = asyncio.run(
                     send_request(
                         Path(tmp),
                         {"command": "wait-tasks", "timeout_seconds": 10},
+                        return_all=True,
                     )
                 )
-            wait.assert_awaited_once_with(10.0)
+            self.assertEqual(wait.await_args.args[0], 10.0)
             self.assertEqual(
-                response,
+                responses[0],
+                {
+                    "status": "progress",
+                    "command": "wait-tasks",
+                    "details": {"waiting": 2, "running": 1},
+                },
+            )
+            self.assertEqual(
+                responses[-1],
                 {"status": "finished", "command": "wait-tasks", "active": {}},
             )
 
     def test_postgres_idle_control_reply(self):
         sample = {"processes": 2, "cpu_seconds": 0}
+
+        async def wait_postgres(timeout, progress):
+            progress({"cpu_pct": 0.5, "quiet_samples": 0})
+            return sample
+
         with tempfile.TemporaryDirectory() as tmp:
             with patch(
                 "pulp_juicer.collector.collector.wait_for_postgres_idle_async",
-                return_value=sample,
+                side_effect=wait_postgres,
             ) as wait:
-                response = asyncio.run(
+                responses = asyncio.run(
                     send_request(
                         Path(tmp),
                         {"command": "wait-postgres-idle", "timeout_seconds": 10},
+                        return_all=True,
                     )
                 )
-            wait.assert_awaited_once_with(10.0)
+            self.assertEqual(wait.await_args.args[0], 10.0)
             self.assertEqual(
-                response,
+                responses[0]["details"], {"cpu_pct": 0.5, "quiet_samples": 0}
+            )
+            self.assertEqual(
+                responses[-1],
                 {
                     "status": "finished",
                     "command": "wait-postgres-idle",

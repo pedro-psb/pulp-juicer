@@ -18,11 +18,11 @@ from .data_service.fixture import MavenServiceFixture
 
 EXPERIMENT = ExperimentConfig(
     id="maven-pull-through",
-    short_description="Compare Maven pull-through candidates under two load patterns.",
+    short_description="Compare Maven pull-through and upload candidates under load.",
     description=(
-        "Compare Maven pull-through implementations under burst and moderate request loads. "
-        "Each candidate serves artifacts from the same generated upstream fixture, allowing "
-        "response time and request completion to be compared across repeated runs."
+        "Compare Maven pull-through and upload behavior across two Pulp candidates. "
+        "Both workloads use the same generated artifact fixture, allowing response time "
+        "and request completion to be compared across repeated runs."
     ),
     required_sources=("pulpcore", "pulp_maven"),
     fixtures=(
@@ -117,6 +117,17 @@ EXPERIMENT = ExperimentConfig(
             input=scenario_input.build_pull_through,
             run_order=(1, 2),
             load=UnitaryImpulseLoad(request_count=1000),
+        ),
+        ScenarioConfig(
+            id="upload-impulse",
+            description="Upload 100 unique Maven JARs, then modify the normal repository.",
+            driver="http_upload",
+            requires=(
+                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
+            ),
+            input=scenario_input.build_upload,
+            run_order=(1, 2),
+            load=UnitaryImpulseLoad(request_count=100),
         ),
     ),
 )

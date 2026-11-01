@@ -1,9 +1,11 @@
 """Manage the Pulp Compose services needed by planned runs."""
 
+import json
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TextIO
 from urllib.parse import urlsplit
@@ -23,6 +25,13 @@ class ComposeRuntime:
         self.sources: dict[str, Path] = {}
         self.started = False
 
+    def _command_args(self, files: tuple[Path, ...], *args: str) -> list[str]:
+        command = [*self.plan.compose_command, "--project-name", self.project]
+        for file in files:
+            command.extend(("--file", str(file)))
+        command.extend(args)
+        return command
+
     def command(
         self,
         files: tuple[Path, ...],
@@ -33,10 +42,7 @@ class ComposeRuntime:
         output: TextIO | None = None,
         timeout: float | None = None,
     ):
-        command = [*self.plan.compose_command, "--project-name", self.project]
-        for file in files:
-            command.extend(("--file", str(file)))
-        command.extend(args)
+        command = self._command_args(files, *args)
         env = os.environ.copy()
         env.update(environment)
         return subprocess.run(
@@ -159,24 +165,36 @@ class ComposeRuntime:
         """Ask the s6 collector to run a named job and await its reply."""
         return self._request_collector("collect", name, timeout_seconds)
 
-    def wait_for_tasks(self, timeout_seconds: float = 600) -> str:
+    def wait_for_tasks(
+        self,
+        timeout_seconds: float = 600,
+        on_progress: Callable[[dict], None] | None = None,
+    ) -> str:
         """Wait for non-scheduled Pulp tasks to reach a terminal state."""
-        return self._request_collector("wait-tasks", None, timeout_seconds)
+        return self._request_collector("wait-tasks", None, timeout_seconds, on_progress)
 
-    def wait_for_postgres_idle(self, timeout_seconds: float = 120) -> str:
+    def wait_for_postgres_idle(
+        self,
+        timeout_seconds: float = 120,
+        on_progress: Callable[[dict], None] | None = None,
+    ) -> str:
         """Wait for two consecutive PostgreSQL samples with zero CPU use."""
-        return self._request_collector("wait-postgres-idle", None, timeout_seconds)
+        return self._request_collector(
+            "wait-postgres-idle", None, timeout_seconds, on_progress
+        )
 
     def finalize_collectors(self, timeout_seconds: float = 15) -> str:
         """Stop periodic sampling and wait until Parquet footers are written."""
         return self._request_collector("finalize", None, timeout_seconds)
 
     def _request_collector(
-        self, command: str, name: str | None, timeout_seconds: float
+        self,
+        command: str,
+        name: str | None,
+        timeout_seconds: float,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> str:
-        result = self.command(
-            self.files,
-            self.environment,
+        args = (
             "exec",
             "--no-TTY",
             "pulp",
@@ -186,7 +204,73 @@ class ComposeRuntime:
             *((name,) if name else ()),
             "--timeout",
             str(timeout_seconds),
+        )
+        if command.startswith("wait-"):
+            return self._stream_collector(args, timeout_seconds + 10, on_progress)
+        result = self.command(
+            self.files,
+            self.environment,
+            *args,
             capture=True,
-            timeout=timeout_seconds + (10 if command.startswith("wait-") else 5),
+            timeout=timeout_seconds + 5,
         )
         return result.stdout.strip()
+
+    def _stream_collector(
+        self,
+        args: tuple[str, ...],
+        timeout_seconds: float,
+        on_progress: Callable[[dict], None] | None,
+    ) -> str:
+        command = self._command_args(self.files, *args)
+        env = os.environ.copy()
+        env.update(self.environment)
+        output = []
+        final = None
+        expired = threading.Event()
+        with subprocess.Popen(
+            command,
+            cwd=self.plan.repository_root,
+            env=env,
+            text=True,
+            bufsize=1,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        ) as process:
+
+            def stop_on_timeout():
+                if process.poll() is None:
+                    expired.set()
+                    process.kill()
+
+            timer = threading.Timer(timeout_seconds, stop_on_timeout)
+            timer.daemon = True
+            timer.start()
+            try:
+                for line in process.stdout:
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        output.append(line)
+                        continue
+                    if message.get("status") == "progress":
+                        if on_progress:
+                            on_progress(message["details"])
+                    elif message.get("status") == "finished":
+                        final = line.strip()
+                    else:
+                        output.append(line)
+                returncode = process.wait()
+            finally:
+                timer.cancel()
+        if expired.is_set():
+            raise subprocess.TimeoutExpired(
+                command, timeout_seconds, output="".join(output)
+            )
+        if returncode:
+            raise subprocess.CalledProcessError(
+                returncode, command, stderr="".join(output)
+            )
+        if final is None:
+            raise RuntimeError("Collector did not return a final reply")
+        return final

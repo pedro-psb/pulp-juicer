@@ -28,7 +28,85 @@ def pre_test_functions():
     ]
 
 
+class FakeCollectorProcess:
+    def __init__(self, lines):
+        self.stdout = iter(lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def poll(self):
+        return 0
+
+    def wait(self):
+        return 0
+
+
 class TestExecution(unittest.TestCase):
+    def test_upload_receives_credentials_without_adding_them_to_setup_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "run001"
+            connection = PulpConnection(username="admin", password="test-secret")
+            candidate = SimpleNamespace(
+                id=1,
+                name="normal",
+                sources={},
+                pre_test_functions=[],
+                pulp_settings={},
+            )
+            run = RunMetadata(
+                "smoke",
+                "upload",
+                candidate,
+                "run001",
+                {},
+                (),
+                UnitaryImpulseLoad(request_count=1),
+                "http_upload",
+                lambda *args: {
+                    "base_url": connection.base_url,
+                    "requests": [{"path": "pulp/api/v3/content/maven/artifact/"}],
+                },
+                output,
+            )
+            plan = SimpleNamespace(
+                execution_id="smoke__upload__001",
+                runs=(run,),
+                experiment=SimpleNamespace(required_sources=()),
+                repository_root=root,
+                results_dir=root,
+                pulp_connection=connection,
+                compose_command=("docker", "compose"),
+                compose_file=root / "pulp.yaml",
+            )
+            observed = {}
+
+            def fake_locust(_run, start, stop, **kwargs):
+                output.mkdir()
+                observed.update(start())
+                stop()
+                return SimpleNamespace(
+                    timed_out=False,
+                    completed_requests=1,
+                    expected_requests=1,
+                    failures=0,
+                    result_dir=output,
+                )
+
+            with (
+                patch("pulp_juicer.execution.ComposeRuntime"),
+                patch("pulp_juicer.execution.PulpClient.get", return_value={}),
+                patch("pulp_juicer.execution.run_locust", side_effect=fake_locust),
+                patch("pulp_juicer.execution._write_run_context") as write_context,
+            ):
+                execute_test_plan(plan)
+            self.assertEqual(observed["auth"], ("admin", "test-secret"))
+            self.assertNotIn("auth", write_context.call_args.args[2])
+
     def test_post_debug_keeps_services_after_success_or_test_failure(self):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as tmp:
@@ -41,6 +119,7 @@ class TestExecution(unittest.TestCase):
                 )
                 run = SimpleNamespace(
                     result_dir=output,
+                    driver="http_get",
                     scenario_id="small",
                     run_id="run001",
                     candidate=candidate,
@@ -455,6 +534,30 @@ class TestExecution(unittest.TestCase):
                 path.write_text("pulp | service output\n")
                 return path
 
+            def fake_postgres_wait(*, on_progress):
+                on_progress(
+                    {
+                        "cpu_pct": 1.5,
+                        "processes": 4,
+                        "quiet_samples": 0,
+                        "elapsed_seconds": 5,
+                    }
+                )
+                return '{"status":"finished"}'
+
+            def fake_task_wait(*, on_progress):
+                on_progress(
+                    {
+                        "waiting": 2,
+                        "running": 1,
+                        "canceling": 0,
+                        "completed": 7,
+                        "failed": 0,
+                        "elapsed_seconds": 5,
+                    }
+                )
+                return '{"status":"finished"}'
+
             with (
                 patch("pulp_juicer.execution.ComposeRuntime") as runtime_type,
                 patch(
@@ -474,6 +577,10 @@ class TestExecution(unittest.TestCase):
             ):
                 runtime_type.return_value.project = "smoke"
                 runtime_type.return_value.dump_logs.side_effect = fake_dump_logs
+                runtime_type.return_value.wait_for_postgres_idle.side_effect = (
+                    fake_postgres_wait
+                )
+                runtime_type.return_value.wait_for_tasks.side_effect = fake_task_wait
                 results = execute_test_plan(plan, on_progress=progress.append)
             self.assertEqual(
                 [result.run_id for result in results], ["run001", "run002"]
@@ -566,6 +673,15 @@ class TestExecution(unittest.TestCase):
             self.assertEqual(progress.count("Post-test hooks finished"), 2)
             self.assertIn("Prepared fixture fixture", progress)
             self.assertIn("Skipping fixture fixture: already prepared", progress)
+            self.assertIn(
+                "PostgreSQL readiness: CPU 1.5%, 4 processes, quiet 0/2 (5s elapsed)",
+                progress,
+            )
+            self.assertIn(
+                "Pulp tasks: 2 waiting, 1 running, 0 canceling, 7 completed, "
+                "0 failed (5s elapsed)",
+                progress,
+            )
 
     def test_compose_runtime_dumps_all_service_logs_with_timestamps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -699,12 +815,21 @@ class TestExecution(unittest.TestCase):
         )
         runtime = ComposeRuntime(plan)
         runtime.files = (plan.compose_file,)
+        progress = []
         with patch(
-            "pulp_juicer.compose_runtime.subprocess.run",
-            return_value=SimpleNamespace(stdout='{"status":"finished"}\n'),
+            "pulp_juicer.compose_runtime.subprocess.Popen",
+            return_value=FakeCollectorProcess(
+                [
+                    '{"status":"progress","details":{"waiting":2}}\n',
+                    '{"status":"finished","active":{}}\n',
+                ]
+            ),
         ) as command:
-            runtime.wait_for_tasks(timeout_seconds=3)
-        self.assertEqual(command.call_args.kwargs["timeout"], 13)
+            self.assertEqual(
+                runtime.wait_for_tasks(timeout_seconds=3, on_progress=progress.append),
+                '{"status":"finished","active":{}}',
+            )
+        self.assertEqual(progress, [{"waiting": 2}])
         self.assertEqual(
             command.call_args.args[0][-8:],
             [
@@ -728,12 +853,23 @@ class TestExecution(unittest.TestCase):
         )
         runtime = ComposeRuntime(plan)
         runtime.files = (plan.compose_file,)
+        progress = []
         with patch(
-            "pulp_juicer.compose_runtime.subprocess.run",
-            return_value=SimpleNamespace(stdout='{"status":"finished"}\n'),
+            "pulp_juicer.compose_runtime.subprocess.Popen",
+            return_value=FakeCollectorProcess(
+                [
+                    '{"status":"progress","details":{"cpu_pct":1.5}}\n',
+                    '{"status":"finished","sample":{"cpu_pct":0}}\n',
+                ]
+            ),
         ) as command:
-            runtime.wait_for_postgres_idle(timeout_seconds=3)
-        self.assertEqual(command.call_args.kwargs["timeout"], 13)
+            self.assertEqual(
+                runtime.wait_for_postgres_idle(
+                    timeout_seconds=3, on_progress=progress.append
+                ),
+                '{"status":"finished","sample":{"cpu_pct":0}}',
+            )
+        self.assertEqual(progress, [{"cpu_pct": 1.5}])
         self.assertEqual(
             command.call_args.args[0][-8:],
             [

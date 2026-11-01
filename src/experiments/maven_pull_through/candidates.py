@@ -49,7 +49,9 @@ def _setup_maven(
     )
     return {
         "base_url": distribution["base_url"],
+        "api_base_url": connection.base_url,
         "repository": repository,
+        "staging_enabled": bool(repository_options.get("staging_enabled")),
         "distribution": distribution["pulp_href"],
         "remote": remote,
     }
