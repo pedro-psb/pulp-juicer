@@ -1,6 +1,5 @@
 """Upload requests use multipart POST and keep Pulp credentials out of artifacts."""
 
-import csv
 import json
 import tempfile
 import unittest
@@ -8,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pyarrow.parquet as pq
 from locust.clients import HttpSession
 import requests
 
@@ -155,15 +155,12 @@ class TestUploadDriver(unittest.TestCase):
             self.assertEqual(result.completed_requests, 3)
             self.assertEqual(result.expected_requests, 3)
             self.assertEqual(result.failures, 0)
-            with (metadata.result_dir / "data_load.csv").open(newline="") as stream:
-                rows = list(csv.DictReader(stream))
-                self.assertEqual(
-                    [row["name"] for row in rows],
-                    ["maven-upload", "maven-upload", "maven-modify"],
-                )
-            self.assertNotIn(
-                "secret", (metadata.result_dir / "data_load.csv").read_text()
+            rows = pq.read_table(metadata.result_dir / "data_load.parquet").to_pylist()
+            self.assertEqual(
+                [row["name"] for row in rows],
+                ["maven-upload", "maven-upload", "maven-modify"],
             )
+            self.assertNotIn("secret", str(rows))
 
         self.assertEqual(len(prepared_requests), 3)
         request = prepared_requests[0]

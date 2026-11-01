@@ -22,7 +22,7 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - Each fixture is an experiment-specific class derived from `ServiceFixture` or `VolumeFixture`.
 - `compose.yaml` defines Pulp; the runner adds fixture service fragments from required fixture metadata.
 - `Containerfile` builds Pulp with the selected pulpcore and plugin source contexts.
-- `pulp_juicer/collector` supplies a noarch RPM with the s6 collector service. `PulpComponents` discovers API, content, task worker, and PostgreSQL processes through s6, and exposes Pulp's worker temp directories and database connection settings. Periodic collectors write separate Parquet files: timestamps, PostgreSQL process-tree CPU and memory, per-content-worker storage I/O rates (`content_io.parquet`), and Pulp working-directory files and bytes (`pulp_temp.parquet`). The working directory is shared, so its file counts are not attributable to content workers alone. The collector discovers services as root; its PostgreSQL snapshot helper reads proportional set size (PSS) as the `postgres` user, and its content I/O helper reads process counters as the `pulp` user. Before teardown, the runner requests an on-demand PostgreSQL task snapshot (`tasking.parquet`) through a Unix socket, finalizes periodic Parquet files, and copies them into the run's `collectors/` directory. Compose logs are retained for debugging.
+- `pulp_juicer/collector` supplies a noarch RPM with the s6 collector service. `PulpComponents` discovers API, content, task worker, and PostgreSQL processes through s6, and exposes Pulp's worker temp directories and database connection settings. Periodic collectors write separate Parquet files: timestamps, PostgreSQL process-tree CPU and memory, per-content-worker storage I/O rates (`content_io.parquet`), per-API-worker CPU, PSS memory, and storage I/O rates (`api_worker.parquet`), and Pulp working-directory files and bytes (`pulp_temp.parquet`). The working directory is shared, so its file counts are not attributable to content workers alone. The collector discovers services as root; its PostgreSQL snapshot helper reads proportional set size (PSS) as the `postgres` user, and its worker I/O helper reads process counters as the `pulp` user. Before teardown, the runner requests an on-demand PostgreSQL task snapshot (`tasking.parquet`) through a Unix socket, finalizes periodic Parquet files, and copies them into the run's `collectors/` directory. Compose logs are retained for debugging.
 - `settings/settings.py` applies shared settings and the selected candidate's `pulp_settings`.
 - `candidates.py` defines one setup function per candidate, used by their `PreTestFunction` records. They configure Maven resources using `pulp_juicer.PulpClient`.
 - `data_service/compose.yaml` defines the upstream HTTP service.
@@ -60,8 +60,11 @@ uv run --locked pulp-juicer show maven-pull-through
 uv run --locked pulp-juicer squeeze maven-pull-through
 uv run --locked pulp-juicer squeeze maven-pull-through --scenario burst --run-id run001
 uv run --locked --group report pulp-juicer report
+uv run --locked --group report pulp-juicer report --zip
 ```
 
 Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. A bare experiment name lists the available runs.
 Each squeeze gets a new numbered execution ID. Add `-f` to replace the latest execution for the selected scope.
 
+
+Run measurements use Parquet (`requests.parquet`, `data_load.parquet`, Locust exports, and `collectors/*.parquet`). Locust’s original CSV exports are retained under `raw/`; report SVGs are stored under `graphs/`. Trial comparison SVGs and phase timings (`timings.parquet`) live in the execution directory.

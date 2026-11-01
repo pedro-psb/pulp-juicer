@@ -8,6 +8,8 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from .result_data import graph_path
+
 import pyarrow.parquet as pq
 
 
@@ -310,14 +312,16 @@ def task_report_sections(
     ):
         values = [row[field] / 1000 for row in rows if row[field] is not None]
         if wait_distribution_chart(
-            run_dir / filename, [("This run", color, values, len(rows))], title
+            graph_path(run_dir, filename),
+            [("This run", color, values, len(rows))],
+            title,
         ):
             distribution += [
                 f"#### {title} distribution",
                 "",
                 "Bars count tasks in shared millisecond ranges; tasks missing either phase timestamp are excluded.",
                 "",
-                f"![{title} distribution]({asset}/{filename})",
+                f"![{title} distribution]({asset}/graphs/{filename})",
                 "",
             ]
     grouped = defaultdict(list)
@@ -380,13 +384,13 @@ def task_report_sections(
     metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
     load_start = metadata.get("result", {}).get("load_start_utc")
     origin = datetime.fromisoformat(load_start) if load_start else None
-    chart_path = run_dir / "report_tasks.svg"
+    chart_path = graph_path(run_dir, "report_tasks.svg")
     timeline = []
     if _task_chart(chart_path, rows, origin):
         timeline = [
             "#### Pulp tasks",
             "",
-            f"![Pulp tasks dispatched, started, and completed per second]({asset}/report_tasks.svg)",
+            f"![Pulp tasks dispatched, started, and completed per second]({asset}/graphs/report_tasks.svg)",
             "",
         ]
     return lines, distribution, timeline

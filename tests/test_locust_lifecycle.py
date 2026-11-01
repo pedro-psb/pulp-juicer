@@ -1,6 +1,5 @@
 """The Python wrapper brackets each Locust measurement."""
 
-import csv
 import hashlib
 import tempfile
 import threading
@@ -11,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pyarrow.parquet as pq
 import gevent
 from locust import User, task
 from locust.env import Environment
@@ -148,7 +148,12 @@ class TestLocustLifecycle(unittest.TestCase):
                 )
                 self.assertEqual(result.failures, 1)
                 self.assertEqual(result.completed_requests, 1)
-                self.assertTrue((metadata.result_dir / "locust_failures.csv").is_file())
+                self.assertTrue(
+                    (metadata.result_dir / "locust_failures.parquet").is_file()
+                )
+                self.assertTrue(
+                    (metadata.result_dir / "raw" / "locust_failures.csv").is_file()
+                )
         finally:
             server.shutdown()
             server.server_close()
@@ -219,7 +224,7 @@ class TestLocustLifecycle(unittest.TestCase):
                 def start():
                     events.append("start")
                     self.assertFalse(
-                        (metadata.result_dir / "locust_stats_history.csv").exists()
+                        (metadata.result_dir / "locust_stats_history.parquet").exists()
                     )
                     return {
                         "base_url": f"http://127.0.0.1:{server.server_port}",
@@ -236,10 +241,10 @@ class TestLocustLifecycle(unittest.TestCase):
 
                 def stop():
                     self.assertTrue(
-                        (metadata.result_dir / "locust_stats.csv").is_file()
+                        (metadata.result_dir / "locust_stats.parquet").is_file()
                     )
                     self.assertTrue(
-                        (metadata.result_dir / "locust_stats_history.csv").is_file()
+                        (metadata.result_dir / "locust_stats_history.parquet").is_file()
                     )
                     events.append("stop")
 
@@ -261,8 +266,9 @@ class TestLocustLifecycle(unittest.TestCase):
                 self.assertGreaterEqual(
                     sum(" requests," in line for line in progress), 3
                 )
-                with (metadata.result_dir / "data_load.csv").open(newline="") as stream:
-                    data_load = list(csv.DictReader(stream))
+                data_load = pq.read_table(
+                    metadata.result_dir / "data_load.parquet"
+                ).to_pylist()
                 self.assertEqual([row["path"] for row in data_load], ["0", "1"])
                 self.assertEqual(
                     [row["url"] for row in data_load],

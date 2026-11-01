@@ -1,6 +1,5 @@
 """Render a Quarto report from completed load-test runs."""
 
-import csv
 import html
 import itertools
 import json
@@ -8,7 +7,6 @@ import math
 import shutil
 import subprocess
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
 
 from .collector_metrics import (
@@ -17,15 +15,13 @@ from .collector_metrics import (
     read_samples,
     summarize_content_io,
     summarize_pulp_temp,
+    summarize_worker_resources,
+    worker_resource_series,
 )
 from .postgres_metrics import read_postgres_samples, summarize_postgres
+from .result_data import graph_path, normalize_execution, normalize_run, read_rows
 
-_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 23 -->"
-
-
-def read_csv(path):
-    with path.open(newline="") as source:
-        return list(csv.DictReader(source))
+_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 25 -->"
 
 
 def number(row, key, suffix="", digits=1):
@@ -253,10 +249,7 @@ def request_starts_per_second(rows, timeline_start, timeline_end):
     counts = Counter(
         max(
             0,
-            math.floor(
-                datetime.fromisoformat(row["started_at_utc"]).timestamp()
-                - timeline_start
-            ),
+            math.floor(row["started_at_utc"].timestamp() - timeline_start),
         )
         for row in rows
     )
@@ -267,25 +260,28 @@ def request_starts_per_second(rows, timeline_start, timeline_end):
 def prepare_run(run_dir, results_dir):
     from .tasking import task_report_sections
 
+    normalize_run(run_dir)
     candidate, run_id = run_dir.parent.name, run_dir.name
     scenario = (
         run_dir.parent.parent.name if run_dir.parent.parent != results_dir else None
     )
 
     def asset(name):
+        if name.endswith(".svg"):
+            name = f"graphs/{name}"
         return f"{run_dir.relative_to(results_dir).as_posix()}/{name}"
 
     metadata_path = run_dir / "run_metadata.json"
     metadata = (
         json.loads(metadata_path.read_text()) if metadata_path.is_file() else None
     )
-    history_path = run_dir / "locust_stats_history.csv"
-    history = (
-        [row for row in read_csv(history_path) if row["Name"] == "Aggregated"]
-        if history_path.is_file()
-        else []
-    )
-    stats_rows = read_csv(run_dir / "locust_stats.csv")
+    history_path = run_dir / "locust_stats_history.parquet"
+    history = [
+        row
+        for row in read_rows(run_dir, "locust_stats_history")
+        if row["Name"] == "Aggregated"
+    ]
+    stats_rows = read_rows(run_dir, "locust_stats")
     stats = next((row for row in stats_rows if row["Name"] == "Aggregated"), None)
     if stats is None:
         raise ValueError(f"No aggregated Locust stats in {run_dir}")
@@ -332,16 +328,15 @@ def prepare_run(run_dir, results_dir):
             throughput.append(
                 (now, (count - previous_count) / max(1, now - previous_time))
             )
-        requests_path = run_dir / "requests.csv"
+        requests_path = run_dir / "requests.parquet"
         if requests_path.is_file():
-            with requests_path.open(newline="") as source:
-                starts = request_starts_per_second(
-                    csv.DictReader(source),
-                    start,
-                    int(history[-1]["Timestamp"]) - start,
-                )
+            starts = request_starts_per_second(
+                read_rows(run_dir, "requests"),
+                start,
+                int(history[-1]["Timestamp"]) - start,
+            )
         chart(
-            run_dir / "report_completed.svg",
+            graph_path(run_dir, "report_completed.svg"),
             "Completed requests",
             "Completed requests (count)",
             completed,
@@ -349,7 +344,7 @@ def prepare_run(run_dir, results_dir):
             request_starts=starts,
         )
         chart(
-            run_dir / "report_throughput.svg",
+            graph_path(run_dir, "report_throughput.svg"),
             "Completed requests per second",
             "Throughput (requests/s)",
             throughput,
@@ -422,7 +417,7 @@ def prepare_run(run_dir, results_dir):
                     ]
             if samples:
                 chart(
-                    run_dir / "report_db_cpu.svg",
+                    graph_path(run_dir, "report_db_cpu.svg"),
                     "PostgreSQL CPU",
                     "PostgreSQL CPU (% of one core)",
                     samples,
@@ -441,7 +436,7 @@ def prepare_run(run_dir, results_dir):
                 timeline += [f"![PostgreSQL CPU]({asset('report_db_cpu.svg')})", ""]
             if memory_samples:
                 chart(
-                    run_dir / "report_db_memory.svg",
+                    graph_path(run_dir, "report_db_memory.svg"),
                     "PostgreSQL memory",
                     "PostgreSQL PSS (MiB)",
                     memory_samples,
@@ -454,26 +449,110 @@ def prepare_run(run_dir, results_dir):
                     "",
                 ]
 
-    content_io = read_samples(run_dir, "content_io")
-    content_summary = summarize_content_io(content_io)
-    if content_summary:
+    api_workers = read_samples(run_dir, "api_worker")
+    api_resources = summarize_worker_resources(api_workers)
+    if api_resources:
         lines += [
-            "#### Content-worker I/O",
+            "#### API-worker resources",
             "",
-            "Storage bytes are attributed by Linux to content-worker processes; they do not measure upstream or client network traffic. Totals approximate the observed counter changes after each worker's first sample.",
+            "CPU 100% means one fully used core across API workers. PSS apportions shared memory. These are process samples, not network traffic.",
             "",
             "| Metric | Value |",
             "|:--|--:|",
-            f"| Storage read | {number(content_summary, 'read_mib', ' MiB', 2)} |",
-            f"| Storage written | {number(content_summary, 'write_mib', ' MiB', 2)} |",
-            f"| Peak storage read rate | {number(content_summary, 'peak_read_mib_s', ' MiB/s', 2)} |",
-            f"| Peak storage write rate | {number(content_summary, 'peak_write_mib_s', ' MiB/s', 2)} |",
-            f"| Read syscalls | {content_summary['read_syscalls']:,} |",
-            f"| Write syscalls | {content_summary['write_syscalls']:,} |",
+            f"| Mean CPU | {number(api_resources, 'cpu_mean_pct', '%', 2)} |",
+            f"| Peak CPU | {number(api_resources, 'cpu_peak_pct', '%', 2)} |",
+            f"| CPU time | {number(api_resources, 'cpu_seconds', ' core-seconds', 2)} |",
+            f"| Mean PSS | {number(api_resources, 'pss_mean_mib', ' MiB', 2)} |",
+            f"| Peak PSS | {number(api_resources, 'pss_peak_mib', ' MiB', 2)} |",
+            f"| Samples | {api_resources['samples']} |",
             "",
         ]
-        series = content_io_series(content_io)
-        origin = min(row["timestamp_utc"] for row in content_io)
+        origin = min(row["timestamp_utc"] for row in api_workers)
+        origin_seconds = origin.timestamp()
+        resource_series = worker_resource_series(api_workers)
+        for key, title, label, color, filename in (
+            (
+                "cpu_pct",
+                "API-worker CPU",
+                "API-worker CPU (% of one core)",
+                "#16a34a",
+                "report_api_cpu.svg",
+            ),
+            (
+                "pss_mib",
+                "API-worker memory",
+                "API-worker PSS (MiB)",
+                "#e56b35",
+                "report_api_memory.svg",
+            ),
+        ):
+            points = [
+                ((time - origin).total_seconds(), value)
+                for time, value in resource_series[key]
+            ]
+            api_completed = (
+                [
+                    (max(0, timestamp - origin_seconds), count)
+                    for timestamp, count in completed_timestamps
+                ]
+                if key == "cpu_pct"
+                else []
+            )
+            api_starts = (
+                [
+                    (start + second - origin_seconds, count)
+                    for second, count in starts
+                    if start + second >= origin_seconds
+                ]
+                if key == "cpu_pct" and start is not None and starts is not None
+                else []
+            )
+            if chart(
+                graph_path(run_dir, filename),
+                title,
+                label,
+                points,
+                color,
+                minimum_y=0,
+                overlay=api_completed,
+                request_starts=api_starts,
+            ):
+                if api_completed:
+                    timeline += [
+                        "#### API-worker CPU",
+                        "",
+                        "Dashed gray shows cumulative completed requests; purple shows new requests per second. Both use their labeled right axes.",
+                        "",
+                    ]
+                else:
+                    timeline += [f"#### {title}", ""]
+                timeline += [f"![{title}]({asset(filename)})", ""]
+
+    for collector_name, worker_label, filename_prefix in (
+        ("content_io", "Content-worker", "content"),
+        ("api_worker", "API-worker", "api"),
+    ):
+        samples = read_samples(run_dir, collector_name)
+        io_summary = summarize_content_io(samples)
+        if not io_summary:
+            continue
+        lines += [
+            f"#### {worker_label} I/O",
+            "",
+            f"Storage bytes are attributed by Linux to {worker_label.lower()} processes; they do not measure network traffic. Totals approximate observed counter changes after each worker's first sample.",
+            "",
+            "| Metric | Value |",
+            "|:--|--:|",
+            f"| Storage read | {number(io_summary, 'read_mib', ' MiB', 2)} |",
+            f"| Storage written | {number(io_summary, 'write_mib', ' MiB', 2)} |",
+            f"| Peak storage read rate | {number(io_summary, 'peak_read_mib_s', ' MiB/s', 2)} |",
+            f"| Peak storage write rate | {number(io_summary, 'peak_write_mib_s', ' MiB/s', 2)} |",
+            f"| Read syscalls | {io_summary['read_syscalls']:,} |",
+            f"| Write syscalls | {io_summary['write_syscalls']:,} |",
+            "",
+        ]
+        series = content_io_series(samples)
+        origin = min(row["timestamp_utc"] for row in samples)
         origin_seconds = origin.timestamp()
         io_completed = [
             (max(0, timestamp - origin_seconds), count)
@@ -488,16 +567,17 @@ def prepare_run(run_dir, results_dir):
             if start is not None and starts is not None
             else []
         )
-        for key, title, color in (
-            ("read_mib_s", "Content-worker storage read", "#2563eb"),
-            ("write_mib_s", "Content-worker storage write", "#e56b35"),
+        for key, direction, color in (
+            ("read_mib_s", "read", "#2563eb"),
+            ("write_mib_s", "write", "#e56b35"),
         ):
+            title = f"{worker_label} storage {direction}"
             points = [
                 ((time - origin).total_seconds(), value) for time, value in series[key]
             ]
-            filename = f"report_content_{key}.svg"
+            filename = f"report_{filename_prefix}_{key}.svg"
             if chart(
-                run_dir / filename,
+                graph_path(run_dir, filename),
                 title,
                 "Storage I/O (MiB/s)",
                 points,
@@ -552,7 +632,7 @@ def prepare_run(run_dir, results_dir):
                 for row in temp
             ]
             filename = f"report_temp_{key}.svg"
-            if chart(run_dir / filename, title, unit, points, color):
+            if chart(graph_path(run_dir, filename), title, unit, points, color):
                 timeline += [f"#### {title}", "", f"![{title}]({asset(filename)})", ""]
 
     task_summary, task_distribution, task_timeline = task_report_sections(
@@ -572,10 +652,12 @@ def prepare_run(run_dir, results_dir):
         ("collector_trigger_error.txt", "Triggered collector error"),
         ("task_wait_error.txt", "Pulp task wait error"),
         ("collector_finalize_error.txt", "Collector finalization error"),
-        ("data_load.csv", "Requests selected for this run"),
-        ("locust_stats.csv", "Locust summary CSV"),
-        ("locust_stats_history.csv", "Locust history CSV"),
-        ("requests.csv", "Individual requests CSV"),
+        ("data_load.parquet", "Selected request data Parquet"),
+        ("locust_stats.parquet", "Locust summary Parquet"),
+        ("locust_stats_history.parquet", "Locust history Parquet"),
+        ("locust_failures.parquet", "Locust failures Parquet"),
+        ("locust_exceptions.parquet", "Locust exceptions Parquet"),
+        ("requests.parquet", "Individual requests Parquet"),
     ):
         if (run_dir / name).is_file():
             details.append(f"- [{label}]({asset(name)})")
@@ -583,6 +665,8 @@ def prepare_run(run_dir, results_dir):
         details.append(
             f"- [{path.stem} collector Parquet]({asset(f'collectors/{path.name}')})"
         )
+    for path in sorted((run_dir / "raw").glob("*.csv")):
+        details.append(f"- [Raw {path.stem} CSV]({asset(f'raw/{path.name}')})")
     details.append("")
     timeline += task_timeline
     if len(timeline) == 2:
@@ -600,9 +684,19 @@ def prepare_run(run_dir, results_dir):
 def completed_runs(execution_dir):
     if not execution_dir.is_dir():
         return
-    stats_files = execution_dir.glob("*/*/*/locust_stats.csv")
-    for run_dir in sorted(stats_files):
-        run_dir = run_dir.parent
+    run_dirs = {
+        path.parent.parent if path.parent.name == "raw" else path.parent
+        for pattern in (
+            "*/*/*/locust_stats.parquet",
+            "*/*/*/locust_stats.csv",
+            "*/*/*/raw/locust_stats.csv",
+        )
+        for path in execution_dir.glob(pattern)
+    }
+    for run_dir in sorted(run_dirs):
+        normalize_run(run_dir)
+        if not (run_dir / "locust_stats.parquet").is_file():
+            continue
         relative = run_dir.relative_to(execution_dir)
         if any(part.startswith("_") for part in relative.parts):
             continue
@@ -616,21 +710,22 @@ def render_report(
 ) -> Path | None:
     """Render one execution, reusing its existing HTML report when present."""
     execution_dir = Path(execution_dir)
+    normalize_execution(execution_dir)
     report = execution_dir / "report.html"
     if report.is_file():
         report_time = report.stat().st_mtime_ns
-        tasking_files = list(execution_dir.glob("*/*/*/collectors/tasking.parquet"))
+        data_files = list(execution_dir.glob("*/*/*/*.parquet")) + list(
+            execution_dir.glob("*/*/*/collectors/*.parquet")
+        )
         source = execution_dir / "report.qmd"
         source_text = source.read_text() if source.is_file() else ""
         generated_source = (
             "# Runs" in source_text or "<!-- pulp-juicer-report-layout:" in source_text
         )
-        layout_stale = (generated_source or bool(tasking_files)) and (
+        layout_stale = (generated_source or bool(data_files)) and (
             not source_text or _REPORT_LAYOUT_MARKER not in source_text
         )
-        data_stale = any(
-            path.stat().st_mtime_ns > report_time for path in tasking_files
-        )
+        data_stale = any(path.stat().st_mtime_ns > report_time for path in data_files)
         if not layout_stale and not data_stale:
             return report.resolve()
     runs = list(completed_runs(execution_dir))

@@ -22,14 +22,17 @@ from .collector_metrics import (
     read_samples,
     summarize_content_io,
     summarize_pulp_temp,
+    summarize_worker_resources,
+    worker_resource_series,
 )
-from .execution_timing import PHASES, parse_execution_timings
+from .execution_timing import PHASES, read_execution_timings
 from .postgres_metrics import read_postgres_samples, summarize_postgres
-from .report import completed_runs, markdown_value, read_csv
+from .report import completed_runs, markdown_value
+from .result_data import graph_path, normalize_execution, normalize_run, read_rows
 from .tasking import task_metrics, wait_distribution_chart
 
 _COLORS = ("#2563eb", "#e56b35", "#16a34a", "#a855f7", "#dc2626", "#0891b2")
-_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 26 -->"
+_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 28 -->"
 _METRICS = (
     ("completed", "Cumulative completed requests", "Completed requests (count)"),
     ("throughput", "Completed requests per second", "Completed requests/s"),
@@ -38,6 +41,10 @@ _METRICS = (
     ("memory", "PostgreSQL memory", "PostgreSQL PSS (MiB)"),
     ("content_read", "Content-worker storage read", "Storage read (MiB/s)"),
     ("content_write", "Content-worker storage write", "Storage write (MiB/s)"),
+    ("api_cpu", "API-worker CPU", "API-worker CPU (% of one core)"),
+    ("api_memory", "API-worker memory", "API-worker PSS (MiB)"),
+    ("api_read", "API-worker storage read", "Storage read (MiB/s)"),
+    ("api_write", "API-worker storage write", "Storage write (MiB/s)"),
     ("temp_bytes", "Pulp temporary file size", "Active files (MiB)"),
     ("temp_files", "Pulp temporary file count", "Active files (count)"),
     ("task_starts", "Pulp tasks started per second", "Tasks started/s"),
@@ -59,6 +66,9 @@ class Trial:
     cpu_pct: float | None
     memory_mib: float | None
     content_io_summary: dict | None
+    api_cpu_pct: float | None
+    api_memory_mib: float | None
+    api_io_summary: dict | None
     temp_summary: dict | None
     metadata: dict | None
     series: dict[str, list[tuple[float, float]]]
@@ -77,19 +87,18 @@ def _float(row, key):
 
 
 def _timeline(run_dir: Path, metadata: dict | None):
-    request_path = run_dir / "requests.csv"
-    rows = read_csv(request_path) if request_path.is_file() else []
-    starts = [datetime.fromisoformat(row["started_at_utc"]).timestamp() for row in rows]
-    completions = [
-        datetime.fromisoformat(row["completed_at_utc"]).timestamp() for row in rows
-    ]
+    rows = read_rows(run_dir, "requests")
+    starts = [row["started_at_utc"].timestamp() for row in rows]
+    completions = [row["completed_at_utc"].timestamp() for row in rows]
     postgres = read_postgres_samples(run_dir)
     content_io = read_samples(run_dir, "content_io")
+    api_workers = read_samples(run_dir, "api_worker")
     temp = read_samples(run_dir, "pulp_temp")
     saved_start = (metadata or {}).get("result", {}).get("load_start_utc")
     observed = [*starts, *completions]
     observed.extend(row["timestamp_utc"].timestamp() for row in postgres)
     observed.extend(row["timestamp_utc"].timestamp() for row in content_io)
+    observed.extend(row["timestamp_utc"].timestamp() for row in api_workers)
     observed.extend(row["timestamp_utc"].timestamp() for row in temp)
     if not saved_start and not observed:
         return {}
@@ -141,6 +150,18 @@ def _timeline(run_dir: Path, metadata: dict | None):
             series[name] = [
                 (time.timestamp() - origin, value) for time, value in io_series[key]
             ]
+    if api_workers:
+        resource_series = worker_resource_series(api_workers)
+        for key, name in (("cpu_pct", "api_cpu"), ("pss_mib", "api_memory")):
+            series[name] = [
+                (time.timestamp() - origin, value)
+                for time, value in resource_series[key]
+            ]
+        io_series = content_io_series(api_workers)
+        for key, name in (("read_mib_s", "api_read"), ("write_mib_s", "api_write")):
+            series[name] = [
+                (time.timestamp() - origin, value) for time, value in io_series[key]
+            ]
     if temp:
         series["temp_bytes"] = [
             (row["timestamp_utc"].timestamp() - origin, row["active_bytes"] / MIB)
@@ -182,7 +203,8 @@ def _task_series(tasks: list[dict], metadata: dict | None):
 
 
 def _read_trial(run_dir: Path) -> Trial | None:
-    rows = read_csv(run_dir / "locust_stats.csv")
+    normalize_run(run_dir)
+    rows = read_rows(run_dir, "locust_stats")
     stats = next((row for row in rows if row.get("Name") == "Aggregated"), None)
     if stats is None:
         return None
@@ -198,6 +220,9 @@ def _read_trial(run_dir: Path) -> Trial | None:
         return None
     postgres_summary = summarize_postgres(read_postgres_samples(run_dir)) or {}
     content_io_summary = summarize_content_io(read_samples(run_dir, "content_io"))
+    api_workers = read_samples(run_dir, "api_worker")
+    api_summary = summarize_worker_resources(api_workers) or {}
+    api_io_summary = summarize_content_io(api_workers)
     temp_summary = summarize_pulp_temp(read_samples(run_dir, "pulp_temp"))
     requests = int(stats["Request Count"])
     task_path = run_dir / "collectors" / "tasking.parquet"
@@ -218,6 +243,9 @@ def _read_trial(run_dir: Path) -> Trial | None:
         cpu_pct=postgres_summary.get("cpu_mean_pct"),
         memory_mib=postgres_summary.get("pss_mean_mib"),
         content_io_summary=content_io_summary,
+        api_cpu_pct=api_summary.get("cpu_mean_pct"),
+        api_memory_mib=api_summary.get("pss_mean_mib"),
+        api_io_summary=api_io_summary,
         temp_summary=temp_summary,
         metadata=metadata,
         series=series,
@@ -430,7 +458,7 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
     safe_scenario = re.sub(r"[^A-Za-z0-9_-]+", "_", scenario)
     name = f"trials_{safe_scenario}_wait_boxplot.svg"
     distribution = []
-    if _wait_boxplot(execution_dir / name, groups, colors):
+    if _wait_boxplot(graph_path(execution_dir, name), groups, colors):
         distribution = [
             "### Wait-time distribution",
             "",
@@ -438,7 +466,7 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
             "",
             "Each point is one run's median creation-to-start wait. Boxes span the 25th–75th percentiles of run medians; center lines show medians and whiskers show the minimum and maximum. Runs without measured waits are omitted. Hover over points for run IDs and sample counts.",
             "",
-            f"![Creation-to-start wait by candidate]({name})",
+            f"![Creation-to-start wait by candidate](graphs/{name})",
             "",
         ]
     for field, title, suffix in (
@@ -460,13 +488,13 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
             for candidate, trials in sorted(groups.items())
         ]
         filename = f"trials_{safe_scenario}_{suffix}_histogram.svg"
-        if wait_distribution_chart(execution_dir / filename, traces, title):
+        if wait_distribution_chart(graph_path(execution_dir, filename), traces, title):
             distribution += [
                 f"#### {title} distribution by candidate",
                 "",
                 "Bars pool task observations across runs within each candidate. Candidate summary statistics above give each run equal weight.",
                 "",
-                f"![{title} distribution by candidate]({filename})",
+                f"![{title} distribution by candidate](graphs/{filename})",
                 "",
             ]
     return lines, distribution
@@ -832,8 +860,8 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
         "",
         "Each value is the mean ± sample SD across runs (n − 1 denominator). Unavailable measurements are omitted; SD is N/A when only one run has a value. Requests within a run are not independent trials.",
         "",
-        "| Candidate | Trials | Requests | Failures | Failure rate (%) | Requests/s | Mean latency (ms) | Run p95 (ms) | Mean DB CPU (%) | Mean DB PSS (MiB) |",
-        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
+        "| Candidate | Trials | Requests | Failures | Failure rate (%) | Requests/s | Mean latency (ms) | Run p95 (ms) | Mean DB CPU (%) | Mean DB PSS (MiB) | Mean API CPU (%) | Mean API PSS (MiB) |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for candidate, candidate_trials in sorted(groups.items()):
         lines.append(
@@ -849,6 +877,8 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
                     "p95_ms",
                     "cpu_pct",
                     "memory_mib",
+                    "api_cpu_pct",
+                    "api_memory_mib",
                 )
             )
             + " |"
@@ -903,21 +933,26 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
             "",
             "Some runs have no run metadata, so their completion and configuration could not be verified.",
         ]
-    if any(trial.content_io_summary for trial in trials):
+    for attribute, label in (
+        ("content_io_summary", "Content-worker"),
+        ("api_io_summary", "API-worker"),
+    ):
+        if not any(getattr(trial, attribute) for trial in trials):
+            continue
         lines += [
             "",
-            "### Content-worker I/O",
+            f"### {label} I/O",
             "",
             "Each value is the mean ± sample SD of run-level measurements. Storage bytes come from Linux process counters and do not include network traffic. Byte totals approximate the observed counter changes after each worker's first sample.",
             "",
             "| Candidate | Trials | Read (MiB) | Written (MiB) | Peak read (MiB/s) | Peak write (MiB/s) | Read syscalls | Write syscalls |",
-            "|:--|--:|--:|--:|--:|--:|--:|--:|",
+            "|:--|--:|--:|--:|--:|--:|--:|--:|--:|",
         ]
         for candidate, candidate_trials in sorted(groups.items()):
             summaries = [
-                trial.content_io_summary
+                summary
                 for trial in candidate_trials
-                if trial.content_io_summary
+                if (summary := getattr(trial, attribute))
             ]
             lines.append(
                 f"| {markdown_value(candidate)} | {len(summaries)} | "
@@ -974,7 +1009,7 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
         "",
         (
             "Time zero is the recorded load start; older results use the first request start. "
-            "Faint lines show individual runs in each candidate's color. For completed requests per second, thick lines show a Gaussian-smoothed mean (3 s bandwidth); their area equals the mean completed-request count. Other thick lines show the pointwise median across runs observed at each time, with no extrapolation beyond a run's observed window. On content I/O charts, gray and purple lines show the median completed requests and new requests per second across the displayed runs, using the labeled right axes."
+            "Faint lines show individual runs in each candidate's color. For completed requests per second, thick lines show a Gaussian-smoothed mean (3 s bandwidth); their area equals the mean completed-request count. Other thick lines show the pointwise median across runs observed at each time, with no extrapolation beyond a run's observed window. On worker I/O charts, gray and purple lines show the median completed requests and new requests per second across the displayed runs, using the labeled right axes."
         ),
         "",
     ]
@@ -993,7 +1028,7 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
             name = f"trials_{safe_scenario}_{metric}.svg"
             if metric == "throughput":
                 _chart(
-                    execution_dir / name,
+                    graph_path(execution_dir, name),
                     axis_label,
                     chart_groups,
                     summary_fn=_smoothed_mean_rate,
@@ -1001,7 +1036,7 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
                 )
             else:
                 request_overlays = None
-                if metric in ("content_read", "content_write"):
+                if metric in ("content_read", "content_write", "api_read", "api_write"):
                     displayed = [trial for trial in trials if trial.series.get(metric)]
                     request_overlays = {
                         key: curve
@@ -1017,13 +1052,13 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
                         )
                     }
                 _chart(
-                    execution_dir / name,
+                    graph_path(execution_dir, name),
                     axis_label,
                     chart_groups,
                     request_overlays=request_overlays,
                     minimum_y=0.01 if metric.startswith("content_") else 1,
                 )
-            graphs += [f"#### {title}", "", f"![{title}]({name})", ""]
+            graphs += [f"#### {title}", "", f"![{title}](graphs/{name})", ""]
     if not any(trial.series for trial in trials):
         graphs += ["No request timelines available.", ""]
     gantt = []
@@ -1031,13 +1066,13 @@ def _scenario_sections(execution_dir, scenario, trials, colors, timings):
     for candidate in names:
         safe_candidate = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate)
         name = f"trials_{safe_scenario}_{safe_candidate}_task_gantt.svg"
-        gantt_width = _task_gantt(execution_dir / name, groups[candidate])
+        gantt_width = _task_gantt(graph_path(execution_dir, name), groups[candidate])
         if gantt_width:
             gantt += [
                 f"#### {markdown_value(candidate)}",
                 "",
                 '::: {style="max-height: 720px; overflow: auto;"}',
-                f"![Task duration Gantt chart]({name}){{width={gantt_width}}}",
+                f"![Task duration Gantt chart](graphs/{name}){{width={gantt_width}}}",
                 ":::",
                 "",
             ]
@@ -1057,14 +1092,20 @@ def render_trial_report(
 ) -> Path | None:
     """Render run-level summaries and candidate comparisons for one execution."""
     execution_dir = Path(execution_dir)
+    normalize_execution(execution_dir)
     report = execution_dir / "trials.html"
     if report.is_file():
         source = execution_dir / "trials.qmd"
-        task_data_is_newer = any(
+        data_is_newer = any(
             path.stat().st_mtime_ns > report.stat().st_mtime_ns
-            for path in execution_dir.glob("*/*/*/collectors/tasking.parquet")
+            for pattern in (
+                "timings.parquet",
+                "*/*/*/*.parquet",
+                "*/*/*/collectors/*.parquet",
+            )
+            for path in execution_dir.glob(pattern)
         )
-        if not task_data_is_newer and (
+        if not data_is_newer and (
             not source.is_file() or _TRIAL_LAYOUT_MARKER in source.read_text()
         ):
             return report.resolve()
@@ -1089,7 +1130,7 @@ def render_trial_report(
     groups = defaultdict(list)
     for trial in trials:
         groups[trial.scenario].append(trial)
-    timings = parse_execution_timings(execution_dir / "execution.log")
+    timings = read_execution_timings(execution_dir)
     lines = [
         "---",
         f"title: {json.dumps(f'Trial comparison: {execution_dir.name}')}",

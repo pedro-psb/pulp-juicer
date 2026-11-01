@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import gevent
+import pyarrow as pa
+import pyarrow.parquet as pq
 from locust import HttpUser, constant, task
 from locust.env import Environment
 from locust.event import Events
@@ -19,6 +21,7 @@ from locust.stats import PERCENTILES_TO_REPORT, StatsCSV, StatsCSVFileWriter
 from locust.util.timespan import parse_timespan
 
 from .plan import RunMetadata, RunResultMetadata
+from .result_data import DATA_LOAD_SCHEMA, REQUEST_SCHEMA, normalize_run
 from .types import StepFunctionLoad, UnitaryImpulseLoad
 
 
@@ -267,55 +270,42 @@ def _run_created(
             on_progress("Load test timed out")
         runner.quit()
 
-    with (output / "data_load.csv").open("w", newline="") as data_file:
-        data_writer = csv.writer(data_file)
-        data_writer.writerow(
-            (
-                "path",
-                "url",
-                "name",
-                "expected_status",
-                "sha256",
-                "wait_seconds",
-                "request_timeout_seconds",
-                "method",
-                "relative_path",
-                "file_path",
-                "repository",
-            )
+    data_rows = [
+        {
+            "path": item["path"],
+            "url": f"{base_url}/{item['path']}",
+            "name": item.get("name", metadata.driver),
+            "expected_status": int(item.get("expected_status", 200)),
+            "sha256": item.get("sha256"),
+            "wait_seconds": wait_seconds,
+            "request_timeout_seconds": state["request_timeout"],
+            "method": "POST" if metadata.driver == "http_upload" else "GET",
+            "relative_path": item.get("relative_path"),
+            "file_path": item.get("file_path"),
+            "repository": item.get("repository"),
+        }
+        for item in requests
+    ]
+    if modify_path:
+        data_rows.append(
+            {
+                "path": modify_path,
+                "url": f"{base_url}/{modify_path}",
+                "name": "maven-modify",
+                "expected_status": 202,
+                "wait_seconds": wait_seconds,
+                "request_timeout_seconds": state["request_timeout"],
+                "method": "POST",
+                "repository": modify_repository,
+            }
         )
-        for item in requests:
-            data_writer.writerow(
-                (
-                    item["path"],
-                    f"{base_url}/{item['path']}",
-                    item.get("name", metadata.driver),
-                    item.get("expected_status", 200),
-                    item.get("sha256", ""),
-                    wait_seconds,
-                    state["request_timeout"],
-                    "POST" if metadata.driver == "http_upload" else "GET",
-                    item.get("relative_path", ""),
-                    item.get("file_path", ""),
-                    item.get("repository", ""),
-                )
-            )
-        if modify_path:
-            data_writer.writerow(
-                (
-                    modify_path,
-                    f"{base_url}/{modify_path}",
-                    "maven-modify",
-                    202,
-                    "",
-                    wait_seconds,
-                    state["request_timeout"],
-                    "POST",
-                    "",
-                    "",
-                    modify_repository,
-                )
-            )
+    pq.write_table(
+        pa.Table.from_pylist(data_rows, schema=DATA_LOAD_SCHEMA),
+        output / "data_load.parquet",
+        compression="zstd",
+    )
+    raw_dir = output / "raw"
+    raw_dir.mkdir(exist_ok=True)
 
     events = Events()
     environment = Environment(user_classes=[RequestUser], events=events)
@@ -330,21 +320,10 @@ def _run_created(
 
     events.request.add_listener(count_request)
 
-    with (output / "requests.csv").open("w", newline="") as request_file:
-        request_writer = csv.writer(request_file)
-        request_writer.writerow(
-            (
-                "started_at_utc",
-                "completed_at_utc",
-                "artifact_path",
-                "url",
-                "response_time_ms",
-                "status_code",
-                "response_bytes",
-                "success",
-                "error",
-            )
-        )
+    with pq.ParquetWriter(
+        output / "requests.parquet", REQUEST_SCHEMA, compression="zstd"
+    ) as request_writer:
+        request_rows = []
 
         def log_request(
             request_type,
@@ -359,25 +338,30 @@ def _run_created(
         ):
             if request_type != ("POST" if metadata.driver == "http_upload" else "GET"):
                 return
-            request_writer.writerow(
-                (
-                    datetime.fromtimestamp(start_time, UTC).isoformat(
-                        timespec="microseconds"
-                    ),
-                    datetime.now(UTC).isoformat(timespec="microseconds"),
-                    (context or {}).get("artifact_path", ""),
-                    url,
-                    f"{response_time:.3f}",
-                    response.status_code if response is not None else "",
-                    response_length,
-                    exception is None,
-                    str(exception) if exception is not None else "",
-                )
+            request_rows.append(
+                {
+                    "started_at_utc": datetime.fromtimestamp(start_time, UTC),
+                    "completed_at_utc": datetime.now(UTC),
+                    "artifact_path": (context or {}).get("artifact_path", ""),
+                    "url": url,
+                    "response_time_ms": response_time,
+                    "status_code": response.status_code
+                    if response is not None
+                    else None,
+                    "response_bytes": response_length,
+                    "success": exception is None,
+                    "error": str(exception) if exception is not None else "",
+                }
             )
+            if len(request_rows) >= 256:
+                request_writer.write_table(
+                    pa.Table.from_pylist(request_rows, schema=REQUEST_SCHEMA)
+                )
+                request_rows.clear()
 
         events.request.add_listener(log_request)
         csv_writer = StatsCSVFileWriter(
-            environment, PERCENTILES_TO_REPORT, str(output / "locust")
+            environment, PERCENTILES_TO_REPORT, str(raw_dir / "locust")
         )
         csv_greenlet = None
         try:
@@ -432,6 +416,10 @@ def _run_created(
                     )
                 finally:
                     csv_writer.close_files()
+            if request_rows:
+                request_writer.write_table(
+                    pa.Table.from_pylist(request_rows, schema=REQUEST_SCHEMA)
+                )
 
     stats = StatsCSV(environment, PERCENTILES_TO_REPORT)
     for name, method in (
@@ -439,8 +427,9 @@ def _run_created(
         ("locust_failures.csv", stats.failures_csv),
         ("locust_exceptions.csv", stats.exceptions_csv),
     ):
-        with (output / name).open("w", newline="") as destination:
+        with (raw_dir / name).open("w", newline="") as destination:
             method(csv.writer(destination))
+    normalize_run(output)
 
     total = environment.stats.total
     result = RunResultMetadata(

@@ -21,7 +21,8 @@ from pulp_juicer.collector.collector import (
     handle_control,
     run_collector,
 )
-from pulp_juicer.collector.content_io import ContentIOSampler
+from pulp_juicer.collector.content_io import ApiWorkerSampler, ContentIOSampler
+from pulp_juicer.collector.content_io_snapshot import snapshot as worker_snapshot
 from pulp_juicer.collector.content_temp import PulpTempSampler
 from pulp_juicer.collector.control import request as control_request
 from pulp_juicer.collector.postgres import PostgresSampler
@@ -202,6 +203,62 @@ class TestCollectors(unittest.TestCase):
         self.assertEqual(measured["read_syscalls_per_s"], 5)
         self.assertEqual(measured["write_syscalls_per_s"], 10)
         self.assertIsNone(new_worker["storage_read_bytes_per_s"])
+
+    def test_api_worker_cpu_memory_and_io_follow_worker_identity(self):
+        components = SimpleNamespace(api_workers=(SimpleNamespace(pid=21),))
+        sampler = ApiWorkerSampler(components)
+        first = {
+            "pid": 21,
+            "create_time": 100.0,
+            "read_bytes": 10,
+            "write_bytes": 20,
+            "read_count": 3,
+            "write_count": 4,
+            "cpu_seconds": 5.0,
+            "pss_bytes": 64 * 2**20,
+        }
+        second = {
+            **first,
+            "read_bytes": 210,
+            "write_bytes": 120,
+            "read_count": 13,
+            "write_count": 24,
+            "cpu_seconds": 5.5,
+            "pss_bytes": 72 * 2**20,
+        }
+        with (
+            patch.object(sampler, "_snapshot", side_effect=[[first], [second]]),
+            patch(
+                "pulp_juicer.collector.content_io.time.monotonic", side_effect=[1, 3]
+            ),
+        ):
+            baseline = sampler.sample()[0]
+            measured = sampler.sample()[0]
+        self.assertIsNone(baseline["cpu_pct"])
+        self.assertEqual(measured["cpu_pct"], 25)
+        self.assertEqual(measured["cpu_seconds"], 0.5)
+        self.assertEqual(measured["pss_bytes"], 72 * 2**20)
+        self.assertEqual(measured["storage_read_bytes_per_s"], 100)
+        self.assertEqual(measured["write_syscalls_per_s"], 10)
+        self.assertIn("api_worker", [collector.name for collector in COLLECTORS])
+
+    def test_api_worker_snapshot_reads_cpu_pss_and_io(self):
+        process = MagicMock()
+        process.oneshot.return_value = nullcontext()
+        process.create_time.return_value = 100.0
+        process.io_counters.return_value = SimpleNamespace(
+            read_bytes=10, write_bytes=20, read_count=3, write_count=4
+        )
+        process.cpu_times.return_value = SimpleNamespace(user=2.0, system=1.5)
+        process.memory_full_info.return_value = SimpleNamespace(pss=64 * 2**20)
+        with patch(
+            "pulp_juicer.collector.content_io_snapshot.psutil.Process",
+            return_value=process,
+        ):
+            rows = worker_snapshot([21], resources=True)
+        self.assertEqual(rows[0]["cpu_seconds"], 3.5)
+        self.assertEqual(rows[0]["pss_bytes"], 64 * 2**20)
+        self.assertEqual(rows[0]["read_bytes"], 10)
 
     def test_pulp_temp_counts_shared_tree_and_sampled_peak(self):
         with tempfile.TemporaryDirectory() as tmp:

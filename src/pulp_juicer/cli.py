@@ -14,6 +14,7 @@ import click
 from rich.console import Console
 from rich.text import Text
 
+from .archive import archive_execution
 from .catalog import experiments
 from .compose_runtime import ComposeRuntime
 from .execution import execute_test_plan
@@ -174,12 +175,20 @@ def show_experiment(experiment_id):
 @click.option(
     "--quarto", "quarto_command", envvar="QUARTO", default="quarto", show_default=True
 )
-def report_results(execution_id, results_dir, quarto_command):
+@click.option(
+    "--zip",
+    "zip_reports",
+    is_flag=True,
+    help="Archive reports and source data per execution.",
+)
+def report_results(execution_id, results_dir, quarto_command, zip_reports):
     """Render one execution's reports, or all executions when omitted."""
     from pyarrow import ArrowException
 
     new_reports = []
     existing_reports = []
+    new_archives = []
+    existing_archives = []
     try:
         if execution_id is not None:
             if Path(execution_id).name != execution_id or not re.fullmatch(
@@ -199,6 +208,7 @@ def report_results(execution_id, results_dir, quarto_command):
                 r".+__\d{3,}", execution_dir.name
             ):
                 continue
+            has_report = False
             for name, renderer in (
                 ("report.html", render_report),
                 ("trials.html", render_trial_report),
@@ -207,11 +217,15 @@ def report_results(execution_id, results_dir, quarto_command):
                 previous_time = output.stat().st_mtime_ns if output.is_file() else None
                 report = renderer(execution_dir, quarto_command)
                 if report is not None:
+                    has_report = True
                     unchanged = (
                         previous_time is not None
                         and output.stat().st_mtime_ns == previous_time
                     )
                     (existing_reports if unchanged else new_reports).append(report)
+            if zip_reports and has_report:
+                archive, refreshed = archive_execution(execution_dir)
+                (new_archives if refreshed else existing_archives).append(archive)
     except (
         OSError,
         ValueError,
@@ -233,6 +247,16 @@ def report_results(execution_id, results_dir, quarto_command):
             click.echo(f"{title}:")
             for report in reports:
                 click.echo(report)
+    if zip_reports:
+        for title, archives in (
+            ("New Archives", new_archives),
+            ("Existing Archives", existing_archives),
+        ):
+            if archives:
+                click.echo()
+                click.echo(f"{title}:")
+                for archive in archives:
+                    click.echo(archive)
 
 
 @cli.command("results")
@@ -278,6 +302,10 @@ def list_results(experiment_id, workdir):
                 if report_file.is_file():
                     _print_styled((report_file, "magenta"))
                     found = True
+            archive = results_dir / f"{execution_dir.name}.zip"
+            if archive.is_file():
+                _print_styled((archive, "magenta"))
+                found = True
     if not found:
         click.echo(f"No results found for {experiment_id} under {results_dir}")
 

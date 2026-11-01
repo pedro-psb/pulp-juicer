@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 
 if __package__:
     from .components import PulpComponents
-    from .content_io import ContentIOSampler
+    from .content_io import ApiWorkerSampler, ContentIOSampler
     from .content_temp import PulpTempSampler
     from .postgres import PostgresSampler
     from .postgres_wait import wait_for_postgres_idle_async
@@ -23,7 +23,7 @@ if __package__:
     from .task_wait import wait_for_tasks_async
 else:
     from components import PulpComponents
-    from content_io import ContentIOSampler
+    from content_io import ApiWorkerSampler, ContentIOSampler
     from content_temp import PulpTempSampler
     from postgres import PostgresSampler
     from postgres_wait import wait_for_postgres_idle_async
@@ -60,6 +60,7 @@ TIMESTAMP_FIELD = pa.field("timestamp_utc", pa.timestamp("us", tz="UTC"))
 COMPONENTS = PulpComponents()
 POSTGRES_SAMPLER = PostgresSampler(COMPONENTS)
 CONTENT_IO_SAMPLER = ContentIOSampler(COMPONENTS)
+API_WORKER_SAMPLER = ApiWorkerSampler(COMPONENTS)
 PULP_TEMP_SAMPLER = PulpTempSampler(COMPONENTS)
 
 
@@ -71,6 +72,11 @@ async def sample_postgres() -> dict:
 async def sample_content_io() -> list[dict]:
     """Record storage-byte and read/write syscall rates for each content worker."""
     return await asyncio.to_thread(CONTENT_IO_SAMPLER.sample)
+
+
+async def sample_api_worker() -> list[dict]:
+    """Record CPU, PSS, storage I/O, and syscall rates for each API worker."""
+    return await asyncio.to_thread(API_WORKER_SAMPLER.sample)
 
 
 async def sample_pulp_temp() -> dict:
@@ -109,6 +115,25 @@ COLLECTORS = (
             ]
         ),
         sample_content_io,
+    ),
+    Collector(
+        "api_worker",
+        pa.schema(
+            [
+                TIMESTAMP_FIELD,
+                pa.field("worker_pid", pa.int32()),
+                pa.field("worker_start_utc", pa.timestamp("us", tz="UTC")),
+                pa.field("interval_s", pa.float64()),
+                pa.field("cpu_pct", pa.float64()),
+                pa.field("cpu_seconds", pa.float64()),
+                pa.field("pss_bytes", pa.int64()),
+                pa.field("storage_read_bytes_per_s", pa.float64()),
+                pa.field("storage_write_bytes_per_s", pa.float64()),
+                pa.field("read_syscalls_per_s", pa.float64()),
+                pa.field("write_syscalls_per_s", pa.float64()),
+            ]
+        ),
+        sample_api_worker,
     ),
     Collector(
         "pulp_temp",

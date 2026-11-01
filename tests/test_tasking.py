@@ -148,11 +148,11 @@ class TestTasking(unittest.TestCase):
             self.assertIn("| Median ready queue wait | 40.00 ms |", source)
             self.assertIn("report_task_unblock.svg", "\n".join(distribution))
             self.assertIn("report_task_ready_wait.svg", "\n".join(distribution))
-            ET.parse(run_dir / "report_task_unblock.svg")
-            ET.parse(run_dir / "report_task_ready_wait.svg")
+            ET.parse(run_dir / "graphs" / "report_task_unblock.svg")
+            ET.parse(run_dir / "graphs" / "report_task_ready_wait.svg")
             self.assertIn("report_tasks.svg", "\n".join(timeline))
             self.assertIn("dispatched, started, and completed", "\n".join(timeline))
-            task_chart = ET.parse(run_dir / "report_tasks.svg")
+            task_chart = ET.parse(run_dir / "graphs" / "report_tasks.svg")
             series = {
                 line.attrib["data-series"]: line.attrib["points"]
                 for line in task_chart.iter("{http://www.w3.org/2000/svg}polyline")

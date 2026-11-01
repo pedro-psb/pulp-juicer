@@ -1,4 +1,4 @@
-"""Read and summarize content-worker I/O and Pulp temporary-file samples."""
+"""Read and summarize worker process and Pulp temporary-file samples."""
 
 from collections import defaultdict
 from pathlib import Path
@@ -64,6 +64,39 @@ def summarize_content_io(samples: list[dict]) -> dict | None:
                 for row in active
             )
         ),
+    }
+
+
+def worker_resource_series(samples: list[dict]) -> dict[str, list[tuple]]:
+    """Sum API-worker CPU and PSS at each sample timestamp."""
+    cpu = defaultdict(float)
+    memory = defaultdict(float)
+    for row in samples:
+        timestamp = row["timestamp_utc"]
+        if row.get("cpu_pct") is not None:
+            cpu[timestamp] += row["cpu_pct"]
+        if row.get("pss_bytes") is not None:
+            memory[timestamp] += row["pss_bytes"] / MIB
+    return {
+        "cpu_pct": sorted(cpu.items()),
+        "pss_mib": sorted(memory.items()),
+    }
+
+
+def summarize_worker_resources(samples: list[dict]) -> dict | None:
+    """Summarize API-worker CPU time and aggregate proportional memory."""
+    series = worker_resource_series(samples)
+    cpu = [value for _, value in series["cpu_pct"]]
+    memory = [value for _, value in series["pss_mib"]]
+    if not cpu and not memory:
+        return None
+    return {
+        "cpu_mean_pct": sum(cpu) / len(cpu) if cpu else None,
+        "cpu_peak_pct": max(cpu) if cpu else None,
+        "cpu_seconds": sum(row.get("cpu_seconds") or 0 for row in samples),
+        "pss_mean_mib": sum(memory) / len(memory) if memory else None,
+        "pss_peak_mib": max(memory) if memory else None,
+        "samples": len(memory),
     }
 
 

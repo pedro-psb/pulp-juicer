@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 PHASES = (
     ("Preparation", "start", "pre_finished"),
     ("Locust startup", "pre_finished", "load_started"),
@@ -80,4 +83,63 @@ def parse_execution_timings(path: Path) -> dict[tuple[str, str, str], TrialTimin
                 scenario, run_id, candidate, durations, total_s
             )
         current = None
+    return timings
+
+
+_TIMING_SCHEMA = pa.schema(
+    [
+        pa.field("scenario", pa.string()),
+        pa.field("candidate", pa.string()),
+        pa.field("run_id", pa.string()),
+        *(pa.field(phase, pa.float64()) for phase, _, _ in PHASES),
+        pa.field("total_s", pa.float64()),
+    ]
+)
+
+
+def normalize_execution_timings(execution_dir: Path) -> None:
+    """Convert the diagnostic execution log to phase measurements once it changes."""
+    source = execution_dir / "execution.log"
+    if not source.is_file():
+        return
+    destination = execution_dir / "timings.parquet"
+    if (
+        destination.is_file()
+        and destination.stat().st_mtime_ns >= source.stat().st_mtime_ns
+    ):
+        return
+    rows = [
+        {
+            "scenario": timing.scenario,
+            "candidate": timing.candidate,
+            "run_id": timing.run_id,
+            **{phase: timing.durations_s[phase] for phase, _, _ in PHASES},
+            "total_s": timing.total_s,
+        }
+        for timing in parse_execution_timings(source).values()
+    ]
+    pq.write_table(
+        pa.Table.from_pylist(rows, schema=_TIMING_SCHEMA),
+        destination,
+        compression="zstd",
+    )
+
+
+def read_execution_timings(
+    execution_dir: Path,
+) -> dict[tuple[str, str, str], TrialTiming]:
+    """Read trial phase measurements from their normalized Parquet table."""
+    path = execution_dir / "timings.parquet"
+    if not path.is_file():
+        return {}
+    timings = {}
+    for row in pq.read_table(path).to_pylist():
+        timing = TrialTiming(
+            row["scenario"],
+            row["run_id"],
+            row["candidate"],
+            {phase: row[phase] for phase, _, _ in PHASES},
+            row["total_s"],
+        )
+        timings[(timing.scenario, timing.candidate, timing.run_id)] = timing
     return timings

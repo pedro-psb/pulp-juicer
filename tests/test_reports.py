@@ -4,6 +4,7 @@ import itertools
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -75,6 +76,29 @@ def write_content_samples(run_dir):
     pq.write_table(pa.Table.from_pylist(temp_rows), output / "pulp_temp.parquet")
 
 
+def write_api_samples(run_dir):
+    output = run_dir / "collectors"
+    output.mkdir(exist_ok=True)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = [
+        {
+            "timestamp_utc": start + timedelta(seconds=second),
+            "worker_pid": pid,
+            "interval_s": 1.0,
+            "cpu_pct": float(cpu),
+            "cpu_seconds": cpu / 100,
+            "pss_bytes": 40 * 2**20,
+            "storage_read_bytes_per_s": 2**20,
+            "storage_write_bytes_per_s": 0.5 * 2**20,
+            "read_syscalls_per_s": 10.0,
+            "write_syscalls_per_s": 5.0,
+        }
+        for second in (0, 1)
+        for pid, cpu in ((21, 10), (22, 20))
+    ]
+    pq.write_table(pa.Table.from_pylist(rows), output / "api_worker.parquet")
+
+
 class TestReportDiscovery(unittest.TestCase):
     def test_individual_timelines_draw_new_requests_as_lines_on_all_charts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -95,24 +119,34 @@ class TestReportDiscovery(unittest.TestCase):
             )
             write_postgres_samples(run_dir, 35)
             write_content_samples(run_dir)
+            write_api_samples(run_dir)
 
             _, summary, graphs, details = prepare_run(run_dir, execution)
-            self.assertTrue((run_dir / "report_db_memory.svg").is_file())
+            self.assertTrue((run_dir / "graphs" / "report_db_memory.svg").is_file())
+            self.assertTrue((run_dir / "locust_stats.parquet").is_file())
+            self.assertTrue((run_dir / "raw" / "locust_stats.csv").is_file())
+            self.assertTrue((run_dir / "requests.parquet").is_file())
             self.assertIn("Mean PSS", "\n".join(summary))
             self.assertIn("| Storage read | 6.00 MiB |", "\n".join(summary))
+            self.assertIn("#### API-worker resources", "\n".join(summary))
+            self.assertIn("| Mean CPU | 30.00% |", "\n".join(summary))
+            self.assertIn("#### API-worker I/O", "\n".join(summary))
             self.assertIn("| Peak active files | 4 |", "\n".join(summary))
             self.assertIn("report_content_read_mib_s.svg", "\n".join(graphs))
+            self.assertIn("report_api_cpu.svg", "\n".join(graphs))
+            self.assertIn("report_api_read_mib_s.svg", "\n".join(graphs))
             self.assertIn("report_temp_active_bytes.svg", "\n".join(graphs))
             self.assertIn("content_io collector Parquet", "\n".join(details))
+            self.assertIn("api_worker collector Parquet", "\n".join(details))
             for name in ("read_mib_s", "write_mib_s"):
-                svg = (run_dir / f"report_content_{name}.svg").read_text()
+                svg = (run_dir / "graphs" / f"report_content_{name}.svg").read_text()
                 self.assertIn("Completed requests (right)", svg)
                 self.assertIn("New requests/s (right)", svg)
                 self.assertIn('stroke="#64748b"', svg)
                 self.assertIn('stroke="#7c3aed"', svg)
-            for name in ("completed", "throughput", "db_cpu"):
+            for name in ("completed", "throughput", "db_cpu", "api_cpu"):
                 with self.subTest(chart=name):
-                    root = ET.parse(run_dir / f"report_{name}.svg").getroot()
+                    root = ET.parse(run_dir / "graphs" / f"report_{name}.svg").getroot()
                     purple_lines = [
                         node
                         for node in root.iter("{http://www.w3.org/2000/svg}polyline")
@@ -120,7 +154,8 @@ class TestReportDiscovery(unittest.TestCase):
                     ]
                     self.assertEqual(len(purple_lines), 1)
                     self.assertNotIn(
-                        "<rect x=", (run_dir / f"report_{name}.svg").read_text()
+                        "<rect x=",
+                        (run_dir / "graphs" / f"report_{name}.svg").read_text(),
                     )
 
     def test_mean_sd_uses_runs_as_observations(self):
@@ -246,6 +281,60 @@ class TestReportDiscovery(unittest.TestCase):
         self.assertEqual(response.exit_code, 0, response.output)
         self.assertIn("No completed runs found", response.output)
 
+    def test_report_zip_contains_reports_and_source_data_and_reuses_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp) / "results"
+            execution = results / "maven-pull-through__001"
+            run_dir = execution / "upload-impulse" / "normal" / "run001"
+            collectors = run_dir / "collectors"
+            collectors.mkdir(parents=True)
+            (execution / "report.html").write_text("detailed report")
+            (execution / "trials.html").write_text("trial report")
+            (execution / "execution.log").write_text("run log")
+            (run_dir / "requests.csv").write_text("request data")
+            (collectors / "api_worker.parquet").write_bytes(b"parquet data")
+            args = ["report", execution.name, "--results", str(results), "--zip"]
+            with (
+                patch(
+                    "pulp_juicer.cli.render_report",
+                    return_value=execution / "report.html",
+                ),
+                patch(
+                    "pulp_juicer.cli.render_trial_report",
+                    return_value=execution / "trials.html",
+                ),
+            ):
+                first = CliRunner().invoke(cli, args)
+                self.assertEqual(first.exit_code, 0, first.output)
+                archive = results / f"{execution.name}.zip"
+                self.assertIn("New Archives:\n" + str(archive), first.output)
+                with zipfile.ZipFile(archive) as bundle:
+                    self.assertEqual(
+                        set(bundle.namelist()),
+                        {
+                            f"{execution.name}/report.html",
+                            f"{execution.name}/trials.html",
+                            f"{execution.name}/execution.log",
+                            f"{execution.name}/upload-impulse/normal/run001/requests.csv",
+                            f"{execution.name}/upload-impulse/normal/run001/collectors/api_worker.parquet",
+                        },
+                    )
+                    self.assertEqual(
+                        bundle.read(f"{execution.name}/report.html"), b"detailed report"
+                    )
+                second = CliRunner().invoke(cli, args)
+                self.assertEqual(second.exit_code, 0, second.output)
+                self.assertIn("Existing Archives:\n" + str(archive), second.output)
+                (run_dir / "new_source.csv").write_text("new data")
+                third = CliRunner().invoke(cli, args)
+                self.assertEqual(third.exit_code, 0, third.output)
+                self.assertIn("New Archives:\n" + str(archive), third.output)
+                with zipfile.ZipFile(archive) as bundle:
+                    self.assertIn(
+                        f"{execution.name}/upload-impulse/normal/run001/new_source.csv",
+                        bundle.namelist(),
+                    )
+
     def test_report_command_selects_one_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp)
@@ -344,10 +433,8 @@ class TestReportDiscovery(unittest.TestCase):
                     str(first / "trials.html"),
                     str(second / "report.html"),
                     str(second / "trials.html"),
-                    str(existing / "trials.html"),
-                    "",
-                    "Existing:",
                     str(existing / "report.html"),
+                    str(existing / "trials.html"),
                 ],
             )
             for execution in (first, second):
@@ -361,11 +448,9 @@ class TestReportDiscovery(unittest.TestCase):
                     "[timestamps collector Parquet](burst/normal/run001/collectors/timestamps.parquet)",
                     document,
                 )
-            self.assertEqual((existing / "report.qmd").read_text(), "existing source")
-            self.assertEqual(
-                (existing / "report.html").read_text(), "<html>existing</html>"
-            )
-            self.assertEqual(render.call_count, 5)
+            self.assertIn("# Summaries", (existing / "report.qmd").read_text())
+            self.assertEqual((existing / "report.html").read_text(), "<html>new</html>")
+            self.assertEqual(render.call_count, 6)
 
     def test_trial_report_compares_run_level_results_and_overlays(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -398,6 +483,7 @@ class TestReportDiscovery(unittest.TestCase):
                 )
                 write_postgres_samples(run_dir, cpu)
                 write_content_samples(run_dir)
+                write_api_samples(run_dir)
                 if scenario == "burst" and run_id in ("run001", "run002", "run003"):
                     start = datetime(2026, 1, 1, tzinfo=UTC)
                     pq.write_table(
@@ -500,6 +586,8 @@ class TestReportDiscovery(unittest.TestCase):
             self.assertIn("| staging | 5.00 | -25.00 | -60.00 |", source)
             self.assertIn("### Pulp tasks", source)
             self.assertIn("### Content-worker I/O", source)
+            self.assertIn("### API-worker I/O", source)
+            self.assertIn("Mean API CPU (%)", source)
             self.assertIn("### Pulp temporary files", source)
             self.assertIn("6.00\u00a0±\u00a00.00", source)
             self.assertLess(
@@ -526,7 +614,7 @@ class TestReportDiscovery(unittest.TestCase):
                 source.index("trials_burst_wait_boxplot.svg"),
                 source.index("# Graphs"),
             )
-            wait_svg = execution / "trials_burst_wait_boxplot.svg"
+            wait_svg = execution / "graphs" / "trials_burst_wait_boxplot.svg"
             ET.parse(wait_svg)
             self.assertIn("normal (n=2)", wait_svg.read_text())
             self.assertIn("staging (n=1)", wait_svg.read_text())
@@ -565,12 +653,16 @@ class TestReportDiscovery(unittest.TestCase):
                 "memory",
                 "content_read",
                 "content_write",
+                "api_cpu",
+                "api_memory",
+                "api_read",
+                "api_write",
                 "temp_bytes",
                 "temp_files",
                 "task_starts",
                 "task_completions",
             ):
-                svg = execution / f"trials_burst_{metric}.svg"
+                svg = execution / "graphs" / f"trials_burst_{metric}.svg"
                 self.assertTrue(svg.is_file())
                 ET.parse(svg)
                 self.assertIn("normal / run001", svg.read_text())
@@ -588,7 +680,7 @@ class TestReportDiscovery(unittest.TestCase):
                 )
                 if metric == "throughput":
                     self.assertIn("normal smoothed mean", svg.read_text())
-                if metric in ("content_read", "content_write"):
+                if metric in ("content_read", "content_write", "api_read", "api_write"):
                     self.assertIn('data-series="request-completed"', svg.read_text())
                     self.assertIn('data-series="request-starts"', svg.read_text())
                     self.assertIn("Median completed requests (right)", svg.read_text())
@@ -601,7 +693,7 @@ class TestReportDiscovery(unittest.TestCase):
                 gantt_name = f"trials_burst_{candidate}_task_gantt.svg"
                 self.assertIn(gantt_name, source)
                 self.assertGreater(source.index(gantt_name), source.index("# Graphs"))
-                gantt = ET.parse(execution / gantt_name)
+                gantt = ET.parse(execution / "graphs" / gantt_name)
                 bars = [
                     node
                     for node in gantt.iter("{http://www.w3.org/2000/svg}rect")
@@ -620,14 +712,16 @@ class TestReportDiscovery(unittest.TestCase):
                     self.assertEqual(labels.count("run001"), 1)
                     self.assertEqual(labels.count("run003"), 1)
             self.assertNotIn("trials_calibrate_normal_task_gantt.svg", source)
-            self.assertTrue((execution / "trials_calibrate_completed.svg").is_file())
+            self.assertTrue(
+                (execution / "graphs" / "trials_calibrate_completed.svg").is_file()
+            )
             with patch("pulp_juicer.trial_report.shutil.which") as which:
                 self.assertEqual(render_trial_report(execution), report)
             which.assert_not_called()
 
             source_path = execution / "trials.qmd"
             source_path.write_text(
-                source.replace("<!-- pulp-juicer-trial-layout: 26 -->", "")
+                source.replace("<!-- pulp-juicer-trial-layout: 28 -->", "")
             )
             with (
                 patch(
@@ -640,7 +734,7 @@ class TestReportDiscovery(unittest.TestCase):
                 self.assertEqual(render_trial_report(execution), report)
             refreshed.assert_called_once()
             self.assertIn(
-                "<!-- pulp-juicer-trial-layout: 26 -->", source_path.read_text()
+                "<!-- pulp-juicer-trial-layout: 28 -->", source_path.read_text()
             )
 
     def test_existing_report_needs_no_quarto(self):
