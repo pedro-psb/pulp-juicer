@@ -13,9 +13,19 @@ from pulp_juicer.execution import _write_run_context, execute_test_plan
 from pulp_juicer.plan import RunMetadata, RunResultMetadata
 from pulp_juicer.types import (
     LoadConfig,
+    PreTestFunction,
     PulpConnection,
     ServiceFixtureMetadata,
 )
+
+
+def pre_test_functions():
+    return [
+        PreTestFunction(
+            "Create test resources",
+            Mock(return_value={"base_url": "http://example.test/"}),
+        )
+    ]
 
 
 class TestExecution(unittest.TestCase):
@@ -27,7 +37,7 @@ class TestExecution(unittest.TestCase):
                 candidate = SimpleNamespace(
                     name="normal",
                     sources={},
-                    setup=Mock(return_value={"base_url": "http://example.test/"}),
+                    pre_test_functions=pre_test_functions(),
                 )
                 run = SimpleNamespace(
                     result_dir=output,
@@ -109,6 +119,7 @@ class TestExecution(unittest.TestCase):
                 id=1,
                 name="normal",
                 sources={"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
+                pre_test_functions=pre_test_functions(),
             )
             fixture = ServiceFixtureMetadata(
                 name="maven",
@@ -166,6 +177,7 @@ class TestExecution(unittest.TestCase):
             self.assertEqual(metadata["experiment"], "smoke")
             self.assertEqual(metadata["execution_id"], "smoke__small__run001")
             self.assertEqual(metadata["candidate_id"], 1)
+            self.assertEqual(metadata["pre_test_functions"], ["Create test resources"])
             self.assertEqual(metadata["load"]["request_count"], 1)
             self.assertEqual(metadata["load"]["request_timeout_seconds"], 60)
             self.assertEqual(metadata["setup"]["base_url"], "http://pulp/")
@@ -184,7 +196,7 @@ class TestExecution(unittest.TestCase):
                 id=1,
                 name="normal",
                 sources={"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
-                setup=Mock(return_value={"base_url": "http://example.test/"}),
+                pre_test_functions=pre_test_functions(),
             )
             run = RunMetadata(
                 "smoke",
@@ -269,7 +281,7 @@ class TestExecution(unittest.TestCase):
                 id=1,
                 name="normal",
                 sources={"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
-                setup=Mock(return_value={"base_url": "http://example.test/"}),
+                pre_test_functions=pre_test_functions(),
             )
             run = RunMetadata(
                 "smoke",
@@ -370,7 +382,12 @@ class TestExecution(unittest.TestCase):
                 id=1,
                 name="normal",
                 sources={"pulpcore": "../pulpcore", "pulp_maven": "../pulp_maven"},
-                setup=Mock(return_value={"base_url": "http://example.test/"}),
+                pre_test_functions=pre_test_functions(),
+            )
+            candidate.pre_test_functions.append(
+                PreTestFunction(
+                    "Add candidate marker", Mock(return_value={"marker": 1})
+                )
             )
             alternate = SimpleNamespace(
                 id=2,
@@ -379,7 +396,7 @@ class TestExecution(unittest.TestCase):
                     "pulpcore": "../alternate-pulpcore",
                     "pulp_maven": "../pulp_maven",
                 },
-                setup=Mock(return_value={"base_url": "http://example.test/"}),
+                pre_test_functions=pre_test_functions(),
             )
             load = LoadConfig(users=1, spawn_rate_per_second=1, max_duration="1s")
             input_builder = Mock(
@@ -498,6 +515,12 @@ class TestExecution(unittest.TestCase):
             self.assertIn("Starting small/run002 alternate", progress)
             self.assertEqual(progress.count("Pre-test hooks started"), 2)
             self.assertEqual(progress.count("Pre-test hooks finished"), 2)
+            self.assertEqual(progress.count("Pre-test: Create test resources"), 2)
+            self.assertEqual(progress.count("Pre-test: Add candidate marker"), 1)
+            self.assertEqual(
+                input_builder.call_args_list[0].args[1],
+                {"base_url": "http://example.test/", "marker": 1},
+            )
             self.assertEqual(progress.count("Post-test hooks started"), 2)
             self.assertEqual(progress.count("Post-test hooks finished"), 2)
             self.assertIn("Prepared fixture fixture", progress)
@@ -543,7 +566,7 @@ class TestExecution(unittest.TestCase):
                 id=1,
                 name="normal",
                 sources={},
-                setup=Mock(return_value={"base_url": "http://example.test/"}),
+                pre_test_functions=pre_test_functions(),
             )
             run = RunMetadata(
                 "smoke",

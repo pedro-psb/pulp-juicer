@@ -65,19 +65,19 @@ class VolumeFixture(Fixture, ABC):
 
 
 @dataclass(frozen=True)
-class CandidateConfig(ABC):
+class PreTestFunction:
+    description: str
+    setup_fn: Callable[
+        [PulpConnection, Mapping[str, FixtureMetadata], str], Mapping[str, Any] | None
+    ]
+
+
+@dataclass(frozen=True)
+class CandidateConfig:
     id: int
     name: str
     sources: Mapping[str, str]
-
-    @abstractmethod
-    def setup(
-        self,
-        connection: PulpConnection,
-        fixtures: Mapping[str, FixtureMetadata],
-        run_id: str,
-    ) -> dict:
-        raise NotImplementedError
+    pre_test_functions: list[PreTestFunction]
 
 
 @dataclass(frozen=True)

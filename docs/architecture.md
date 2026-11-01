@@ -9,7 +9,7 @@ experiments/* -> ls -> show <experiment>
                             in-memory plan: selected unit runs
                             optional --save-plan -> _juice/plan-<execution_id>.json
                                           |
-                              Compose cleanup -> fixture, Pulp, candidate setup
+                              Compose cleanup -> fixture, Pulp, candidate pre-test functions
                               Locust library: idle, load, tail, measurements
                               CPU summary -> Compose down (or retain with --post-debug)
                                           |

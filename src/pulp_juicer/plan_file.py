@@ -15,7 +15,7 @@ from .types import (
     VolumeFixtureMetadata,
 )
 
-VERSION = 6
+VERSION = 7
 
 
 def _unit(run: RunMetadata) -> dict:
@@ -25,7 +25,14 @@ def _unit(run: RunMetadata) -> dict:
         fixtures[name] = {"kind": kind, **asdict(metadata)}
     return {
         "run_id": run.run_id,
-        "candidate": asdict(run.candidate),
+        "candidate": {
+            "id": run.candidate.id,
+            "name": run.candidate.name,
+            "sources": dict(run.candidate.sources),
+            "pre_test_functions": [
+                hook.description for hook in run.candidate.pre_test_functions
+            ],
+        },
         "fixtures": fixtures,
         "fixture_builds": [
             {"class": type(item).__name__, **vars(item)} for item in run.fixture_builds
@@ -87,10 +94,15 @@ def write_plan_file(plan: TestPlanMetadata) -> Path:
 def _hydrate_run(
     unit: dict, scenario_id: str, experiment, templates, candidates, input_builder
 ) -> RunMetadata:
-    candidate_data = unit["candidate"]
+    candidate_data = dict(unit["candidate"])
     candidate_id = candidate_data["id"]
     if candidate_id not in candidates:
         raise ValueError(f"Unknown candidate ID: {candidate_id}")
+    saved_hooks = candidate_data.pop("pre_test_functions")
+    if saved_hooks != [
+        hook.description for hook in candidates[candidate_id].pre_test_functions
+    ]:
+        raise ValueError(f"Pre-test functions changed for candidate {candidate_id}")
     candidate = replace(candidates[candidate_id], **candidate_data)
     experiment.validate_candidate_sources(candidate)
     fixtures = {}

@@ -19,7 +19,7 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - `compose.yaml` defines Pulp; the runner adds fixture service fragments from required fixture metadata.
 - `Containerfile` builds Pulp with the selected pulpcore and plugin source contexts.
 - `settings/settings.py` configures Pulp for this experiment's Compose service.
-- `candidates.py` defines candidate classes that implement `setup` and configure the Maven resources using `pulp_juicer.PulpClient`.
+- `candidates.py` defines one setup function per candidate, used by their `PreTestFunction` records. They configure Maven resources using `pulp_juicer.PulpClient`.
 - `data_service/compose.yaml` defines the upstream HTTP service.
 - `data_service/fixture.py` implements `MavenServiceFixture.build` and `generate_metadata`.
   Run it as a module to generate a small fixture and print its metadata: `python -m experiments.maven_pull_through.data_service.fixture --count 10 --size 1024`.
@@ -34,8 +34,8 @@ The runner then calls `build()` and `generate_metadata()` on that configured ins
 The runner combines the main Compose file with service fragments required by the scenario and mounts fixture output directories.
 The Maven fixture writes its artifact manifest into its output directory; scenario input uses that manifest to select requests.
 
-Each candidate's `setup` method receives a `PulpConnection` from `pulp_juicer`, a mapping of required fixture metadata by name, and a unique run ID.
-It uses the library Pulp client to create the remote, repository, and distribution, then returns their references and the distribution base URL.
+Each candidate declares a list of `PreTestFunction(description, setup_fn)` records. The runner calls each function after starting Pulp, passing a `PulpConnection`, required fixture metadata by name, and a unique run ID. The returned mappings are combined for the scenario input function.
+The Maven setup function uses the library Pulp client to create the remote, repository, and distribution, then returns their references and the distribution base URL.
 The scenario input function reads the required fixture's manifest, selects unique paths up to `request_count`, and returns requests for the infrastructure `http_get` driver.
 The experiment modules do not import Locust.
 

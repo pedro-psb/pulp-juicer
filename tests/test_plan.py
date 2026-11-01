@@ -375,6 +375,15 @@ class TestCli(unittest.TestCase):
             data = json.loads(plan_file.read_text())
             self.assertNotIn("password", data["runtime"]["pulp_connection"])
             self.assertEqual(data["execution_id"], "maven-pull-through__burst__002")
+            saved_candidate = data["scenarios"][0]["runs"][0]["candidate"]
+            self.assertEqual(
+                saved_candidate["pre_test_functions"],
+                ["Create Maven remote, repository, and distribution"],
+            )
+            loaded = load_plan_file(plan_file)
+            self.assertTrue(
+                callable(loaded.runs[0].candidate.pre_test_functions[0].setup_fn)
+            )
 
     def test_squeeze_executes_each_scope_from_memory(self):
         with tempfile.TemporaryDirectory() as tmp:

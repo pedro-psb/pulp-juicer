@@ -75,6 +75,9 @@ def _write_run_context(
         "scenario": run.scenario_id,
         "candidate": run.candidate.name,
         "candidate_id": run.candidate.id,
+        "pre_test_functions": [
+            hook.description for hook in run.candidate.pre_test_functions
+        ],
         "fixture": fixture_info,
         "load": {
             "users": run.load.users,
@@ -205,9 +208,15 @@ def execute_test_plan(
                 candidate_run_id = (
                     f"{run.scenario_id}-{run.run_id}-{run.candidate.name}"
                 )
-                candidate_data = run.candidate.setup(
-                    plan.pulp_connection, run.fixtures, candidate_run_id
-                )
+                candidate_data = {}
+                for hook in run.candidate.pre_test_functions:
+                    if on_progress:
+                        on_progress(f"Pre-test: {hook.description}")
+                    output = hook.setup_fn(
+                        plan.pulp_connection, run.fixtures, candidate_run_id
+                    )
+                    if output is not None:
+                        candidate_data.update(output)
                 context.update(
                     candidate_data=candidate_data,
                     source_paths=source_paths,

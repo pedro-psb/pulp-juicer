@@ -217,7 +217,7 @@ def task_metrics(rows: list[dict]) -> dict:
         "throughput": statuses["completed"] / duration_s if duration_s > 0 else None,
         "window_s": duration_s if duration_s > 0 else None,
         "median_execution_ms": statistics.median(durations) if durations else None,
-        "max_execution_ms": max(durations) if durations else None,
+        "total_execution_ms": sum(durations) if durations else None,
         "sum_execution_s": sum(durations) / 1000,
         "wait_count": len(waits),
         "median_wait_ms": statistics.median(waits) if waits else None,
@@ -492,13 +492,13 @@ def task_report_sections(
     for row in rows:
         grouped[row["task_type"] or "Unknown"].append(row)
 
-    def summary(task_type, group, *, total=False):
+    def summary(task_type, group):
         times = [
             row["execution_time_us"] / 1000
             for row in group
             if row["execution_time_us"] is not None
         ]
-        duration = f"{sum(times) if total else max(times):,.2f}" if times else "N/A"
+        duration = f"{sum(times):,.2f}" if times else "N/A"
         return (
             f"| {html.escape(task_type).replace('|', '&#124;')} | {len(group)} | "
             f"{sum(row['status'] == 'completed' for row in group)} | "
@@ -506,7 +506,7 @@ def task_report_sections(
         )
 
     header = [
-        "| Task type | Tasks | Completed | Failed | Max execution (ms) |",
+        "| Task type | Tasks | Completed | Failed | Total execution (ms) |",
         "|:--|--:|--:|--:|--:|",
     ]
     lines += ["##### Most frequent task types", "", *header]
@@ -539,7 +539,7 @@ def task_report_sections(
         ),
     )
     for task_type, group in by_total[:10]:
-        lines.append(summary(task_type, group, total=True))
+        lines.append(summary(task_type, group))
     if not by_total:
         lines.append("No completed task durations were reported.")
     lines.append("")

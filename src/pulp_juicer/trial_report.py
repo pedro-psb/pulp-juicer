@@ -7,6 +7,7 @@ import re
 import shutil
 import statistics
 import subprocess
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,12 +15,12 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
+from .execution_timing import PHASES, parse_execution_timings
 from .report import completed_runs, markdown_value, read_csv
-from .tasking import task_metrics, wait_distribution_chart
+from .tasking import task_metrics
 
 _COLORS = ("#2563eb", "#e56b35", "#16a34a", "#a855f7", "#dc2626", "#0891b2")
-_DASHES = ("", "8 4", "3 3", "11 4 3 4")
-_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 13 -->"
+_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 21 -->"
 _METRICS = (
     ("completed", "Cumulative completed requests", "Completed requests (count)"),
     ("throughput", "Completed requests per second", "Completed requests/s"),
@@ -176,27 +177,98 @@ def _format(value, digits=1):
     return f"{value:,.{digits}f}" if value is not None else "N/A"
 
 
-def _percent(value, digits=2):
-    return f"{_format(value, digits)}%" if value is not None else "N/A"
-
-
-def _spread(trials, attribute, digits=1):
-    values = sorted(
-        value for trial in trials if (value := getattr(trial, attribute)) is not None
-    )
+def _mean_sd(values, digits=2):
+    values = [value for value in values if value is not None]
     if not values:
         return "N/A"
-    middle = _format(statistics.median(values), digits)
-    if len(values) == 1:
-        return middle
-    return f"{middle} ({_format(values[0], digits)}–{_format(values[-1], digits)})"
+    sd = statistics.stdev(values) if len(values) > 1 else None
+    return (
+        f"{_format(statistics.mean(values), digits)}\u00a0±\u00a0{_format(sd, digits)}"
+    )
 
 
 def _contrast(trials, attribute):
     values = [
         value for trial in trials if (value := getattr(trial, attribute)) is not None
     ]
-    return statistics.median(values) if values else None
+    return statistics.mean(values) if values else None
+
+
+def _percentile(values, fraction):
+    index = (len(values) - 1) * fraction
+    low = math.floor(index)
+    high = math.ceil(index)
+    return values[low] + (values[high] - values[low]) * (index - low)
+
+
+def _wait_boxplot(path, groups, colors):
+    """Draw one box per candidate from the median wait of each run."""
+    samples = {}
+    for candidate, trials in sorted(groups.items()):
+        run_medians = []
+        for trial in trials:
+            waits = [
+                row["waiting_time_us"] / 1000
+                for row in trial.tasks or []
+                if row.get("waiting_time_us") is not None
+            ]
+            if waits:
+                run_medians.append((trial.run_id, statistics.median(waits), len(waits)))
+        if run_medians:
+            samples[candidate] = run_medians
+    if not samples:
+        return False
+    width, left, right, top, row_height = 900, 185, 40, 32, 72
+    bottom = top + len(samples) * row_height
+    height = bottom + 65
+    maximum = max(value for runs in samples.values() for _, value, _ in runs)
+    x_max = max(1, maximum * 1.05)
+    plot_width = width - left - right
+
+    def x(value):
+        return left + value * plot_width / x_max
+
+    items = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Run median dispatch-to-start waits by candidate">',
+        '<rect width="100%" height="100%" fill="#fff"/>',
+    ]
+    for tick in range(6):
+        value = x_max * tick / 5
+        position = x(value)
+        items += [
+            f'<line x1="{position:.1f}" y1="{top}" x2="{position:.1f}" y2="{bottom}" stroke="#e5e7eb"/>',
+            f'<text x="{position:.1f}" y="{bottom + 20}" text-anchor="middle">{value:.1f}</text>',
+        ]
+    for index, (candidate, runs) in enumerate(samples.items()):
+        y = top + (index + 0.5) * row_height
+        values = sorted(value for _, value, _ in runs)
+        low, q1, middle, q3, high = (
+            values[0],
+            _percentile(values, 0.25),
+            statistics.median(values),
+            _percentile(values, 0.75),
+            values[-1],
+        )
+        color = colors[candidate]
+        items += [
+            f'<text x="{left - 12}" y="{y + 4:.1f}" text-anchor="end">{html.escape(candidate)} (n={len(runs)})</text>',
+            f'<line x1="{x(low):.1f}" y1="{y:.1f}" x2="{x(high):.1f}" y2="{y:.1f}" stroke="{color}" stroke-width="2"/>',
+            f'<line x1="{x(low):.1f}" y1="{y - 12:.1f}" x2="{x(low):.1f}" y2="{y + 12:.1f}" stroke="{color}" stroke-width="2"/>',
+            f'<line x1="{x(high):.1f}" y1="{y - 12:.1f}" x2="{x(high):.1f}" y2="{y + 12:.1f}" stroke="{color}" stroke-width="2"/>',
+            f'<rect x="{x(q1):.1f}" y="{y - 14:.1f}" width="{max(1, x(q3) - x(q1)):.1f}" height="28" fill="{color}" fill-opacity="0.22" stroke="{color}"/>',
+            f'<line x1="{x(middle):.1f}" y1="{y - 14:.1f}" x2="{x(middle):.1f}" y2="{y + 14:.1f}" stroke="{color}" stroke-width="3"/>',
+        ]
+        for run_id, value, count in runs:
+            items.append(
+                f'<circle cx="{x(value):.1f}" cy="{y:.1f}" r="3" fill="{color}">'
+                f"<title>{html.escape(run_id)}: median {value:.2f} ms from {count} task waits</title></circle>"
+            )
+    items += [
+        f'<text x="{(left + width - right) / 2:.1f}" y="{bottom + 49}" text-anchor="middle">Median dispatch-to-start wait per run (ms)</text>',
+        "</svg>",
+    ]
+    path.write_text("\n".join(items) + "\n")
+    return True
 
 
 def _task_summary_lines(execution_dir, scenario, groups, colors):
@@ -212,32 +284,10 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
         "",
         "### Pulp tasks",
         "",
-        "Task records include setup and background activity from Compose logs. Throughput is completed tasks divided by the first-to-last task event window. Waiting time is available only for tasks with matching dispatch logs, currently scheduled tasks.",
+        "Each value is the mean ± sample SD across runs with task data. Task records include setup and background activity from Compose logs. Throughput is completed tasks divided by the first-to-last task event window. Waiting time requires matching dispatch logs. N/A after ± means only one run had that measurement.",
         "",
-        "| Candidate | Run | Tasks | Completed | Failed | Throughput (tasks/s) | Task types | Workers | Median execution (ms) | Max execution (ms) | Wait samples | Median wait (ms) | Max wait (ms) |",
-        "|:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
-    ]
-    for candidate, trials in sorted(groups.items()):
-        for trial in trials:
-            if trial.tasks is None:
-                continue
-            metrics = task_metrics(trial.tasks)
-            lines.append(
-                f"| {markdown_value(candidate)} | {markdown_value(trial.run_id)} | "
-                f"{metrics['tasks']} | {metrics['completed']} | {metrics['failed']} | "
-                f"{_format(metrics['throughput'], 2)} | {metrics['task_types']} | "
-                f"{metrics['workers']} | {_format(metrics['median_execution_ms'], 2)} | "
-                f"{_format(metrics['max_execution_ms'], 2)} | {metrics['wait_count']} | "
-                f"{_format(metrics['median_wait_ms'], 2)} | {_format(metrics['max_wait_ms'], 2)} |"
-            )
-    lines += [
-        "",
-        "#### Task counts by candidate",
-        "",
-        "Each value is the median across runs, followed by the run range in parentheses.",
-        "",
-        "| Candidate | Trials with task data | Tasks | Completed | Failed | Throughput (tasks/s) | Median execution (ms) | Median wait (ms) |",
-        "|:--|--:|--:|--:|--:|--:|--:|--:|",
+        "| Candidate | Trials | Tasks | Completed | Failed | Throughput (tasks/s) | Median execution (ms) | Total execution (ms) | Median wait (ms) |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for candidate, trials in sorted(groups.items()):
         with_tasks = [trial for trial in trials if trial.tasks is not None]
@@ -250,28 +300,14 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
             "failed",
             "throughput",
             "median_execution_ms",
+            "total_execution_ms",
             "median_wait_ms",
         )
-        metrics = [
-            [item[name] for item in trial_metrics if item[name] is not None]
-            for name in metric_names
-        ]
-
-        def spread(values, digits=0):
-            if not values:
-                return "N/A"
-            middle = _format(statistics.median(values), digits)
-            return (
-                middle
-                if len(values) == 1
-                else f"{middle} ({_format(min(values), digits)}–{_format(max(values), digits)})"
-            )
-
         lines.append(
             f"| {markdown_value(candidate)} | {len(with_tasks)} | "
             + " | ".join(
-                spread(values, 2 if index >= 3 else 0)
-                for index, values in enumerate(metrics)
+                _mean_sd([item[name] for item in trial_metrics])
+                for name in metric_names
             )
             + " |"
         )
@@ -279,7 +315,7 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
         "",
         "#### Most frequent task types",
         "",
-        "| Candidate | Task type | Tasks | Completed | Failed | Max execution (ms) |",
+        "| Candidate | Task type | Tasks | Completed | Failed | Total execution (ms) |",
         "|:--|:--|--:|--:|--:|--:|",
     ]
     grouped = defaultdict(list)
@@ -305,7 +341,7 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
                 f"| {markdown_value(candidate)} | {markdown_value(task_type)} | {len(rows)} | "
                 f"{sum(row['status'] == 'completed' for row in rows)} | "
                 f"{sum(row['status'] == 'failed' for row in rows)} | "
-                f"{_format(max(durations) if durations else None, 2)} |"
+                f"{_format(sum(durations) if durations else None, 2)} |"
             )
     lines += [
         "",
@@ -334,46 +370,59 @@ def _task_summary_lines(execution_dir, scenario, groups, colors):
                 f"| {markdown_value(candidate)} | {markdown_value(task_type)} | {_format(total, 2)} |"
             )
     lines.append("")
-    traces = [
-        (
-            f"{candidate} / {trial.run_id}",
-            colors[candidate],
-            [
-                row["waiting_time_us"] / 1000
-                for row in trial.tasks or []
-                if row.get("waiting_time_us") is not None
-            ],
-            len(trial.tasks or []),
-        )
-        for candidate, trials in sorted(groups.items())
-        for trial in trials
-    ]
     safe_scenario = re.sub(r"[^A-Za-z0-9_-]+", "_", scenario)
-    name = f"trials_{safe_scenario}_wait_distribution.svg"
+    name = f"trials_{safe_scenario}_wait_boxplot.svg"
     distribution = []
-    if wait_distribution_chart(execution_dir / name, traces):
+    if _wait_boxplot(execution_dir / name, groups, colors):
         distribution = [
             "### Wait-time distribution",
             "",
-            "#### Dispatch-to-start wait distribution",
+            "#### Dispatch-to-start wait by candidate",
             "",
-            "Each color shows one run; bars within each labeled millisecond range are side by side. Counts include only tasks with both dispatch and start log entries. The legend shows coverage against all logged tasks.",
+            "Each point is one run's median wait among tasks with dispatch and start logs. Boxes span the 25th–75th percentiles of run medians; center lines show medians and whiskers show the minimum and maximum. Runs without measured waits are omitted. Hover over points for run IDs and sample counts.",
             "",
-            f"![Dispatch-to-start wait distribution]({name})",
+            f"![Dispatch-to-start wait by candidate]({name})",
             "",
         ]
     return lines, distribution
 
 
-def _chart(path: Path, label: str, traces: list[tuple[str, str, str, list]]):
-    if not traces:
+def _median_curve(runs):
+    """Pointwise median, interpolating only inside each run's observed window."""
+    series = []
+    for _, points in runs:
+        ordered = sorted(dict(points).items())
+        if ordered:
+            series.append(([x for x, _ in ordered], [y for _, y in ordered]))
+    xs = sorted({x for times, _ in series for x in times})
+    curve = []
+    for x in xs:
+        values = []
+        for times, heights in series:
+            if x < times[0] or x > times[-1]:
+                continue
+            index = bisect_right(times, x) - 1
+            if times[index] == x or index == len(times) - 1:
+                values.append(heights[index])
+            else:
+                ratio = (x - times[index]) / (times[index + 1] - times[index])
+                values.append(
+                    heights[index] + ratio * (heights[index + 1] - heights[index])
+                )
+        if values:
+            curve.append((x, statistics.median(values)))
+    return curve
+
+
+def _chart(path: Path, label: str, groups):
+    if not groups:
         return
     width, left, right = 960, 84, 24
     top, plot_height = 30, 300
     bottom = top + plot_height
     legend_top = bottom + 66
-    height = legend_top + len(traces) * 22 + 18
-    values = [point for _, _, _, series in traces for point in series]
+    height = legend_top + len(groups) * 44 + 18
+    values = [point for _, _, runs in groups for _, series in runs for point in series]
     x_min = min(0, *(x for x, _ in values))
     x_max = max(1, *(x for x, _ in values))
     y_max = max(1, *(y for _, y in values)) * 1.05
@@ -414,26 +463,36 @@ def _chart(path: Path, label: str, traces: list[tuple[str, str, str, list]]):
         f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#94a3b8"/>',
         f'<line x1="{left}" y1="{bottom}" x2="{width - right}" y2="{bottom}" stroke="#94a3b8"/>',
     ]
-    for index, (name, color, dash, points) in enumerate(traces):
-        coordinates = " ".join(
-            f"{x:.1f},{y:.1f}" for x, y in (xy(*point) for point in points)
-        )
-        dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
-        items += [
-            (
+    for index, (candidate, color, runs) in enumerate(groups):
+        legend_y = legend_top + index * 44
+        for run_id, points in runs:
+            coordinates = " ".join(
+                f"{x:.1f},{y:.1f}" for x, y in (xy(*point) for point in points)
+            )
+            items.append(
                 f'<polyline points="{coordinates}" fill="none" stroke="{color}" '
-                f'stroke-width="2.5"{dash_attr}/>'
-            ),
-            (
-                f'<line x1="{left}" y1="{legend_top + index * 22}" '
-                f'x2="{left + 25}" y2="{legend_top + index * 22}" '
-                f'stroke="{color}" stroke-width="2.5"{dash_attr}/>'
-            ),
-            (
-                f'<text x="{left + 34}" y="{legend_top + index * 22 + 4}">'
-                f"{html.escape(name)}</text>"
-            ),
-        ]
+                'stroke-width="1.5" stroke-opacity="0.22" data-series="run" '
+                f'data-candidate="{html.escape(candidate, quote=True)}" data-run="{html.escape(run_id, quote=True)}">'
+                f"<title>{html.escape(candidate)} / {html.escape(run_id)}</title></polyline>"
+            )
+        median_points = _median_curve(runs)
+        coordinates = " ".join(
+            f"{x:.1f},{y:.1f}" for x, y in (xy(*point) for point in median_points)
+        )
+        items.append(
+            f'<polyline points="{coordinates}" fill="none" stroke="{color}" '
+            'stroke-width="3.5" data-series="median" '
+            f'data-candidate="{html.escape(candidate, quote=True)}"/>'
+        )
+        for offset, name, opacity, thickness in (
+            (0, f"{candidate} runs (n={len(runs)})", "0.22", "1.5"),
+            (22, f"{candidate} median", "1", "3.5"),
+        ):
+            y = legend_y + offset
+            items += [
+                f'<line x1="{left}" y1="{y}" x2="{left + 25}" y2="{y}" stroke="{color}" stroke-opacity="{opacity}" stroke-width="{thickness}"/>',
+                f'<text x="{left + 34}" y="{y + 4}">{html.escape(name)}</text>',
+            ]
     items += [
         (
             f'<text x="{width / 2}" y="{bottom + 45}" text-anchor="middle">'
@@ -543,45 +602,78 @@ def _task_gantt(path: Path, trials: list[Trial]) -> int | None:
     return width
 
 
-def _scenario_sections(execution_dir, scenario, trials, colors):
-    lines = [
-        f"## {markdown_value(scenario)}",
-        "",
-        "### Trials",
-        "",
-        "| Candidate | Run | Completed | Failures | Failure rate | Requests/s | Mean latency (ms) | Run p95 (ms) | Mean DB CPU (%) |",
-        "|:--|:--|--:|--:|--:|--:|--:|--:|--:|",
+def _timing_lines(trials, timings):
+    matched = [
+        (trial, timings[(trial.scenario, trial.candidate, trial.run_id)])
+        for trial in trials
+        if (trial.scenario, trial.candidate, trial.run_id) in timings
     ]
-    for trial in trials:
-        lines.append(
-            f"| {markdown_value(trial.candidate)} | {markdown_value(trial.run_id)} | "
-            f"{trial.requests} | {trial.failures} | {_percent(trial.failure_pct)} | "
-            f"{_format(trial.rate, 2)} | {_format(trial.mean_ms)} | "
-            f"{_format(trial.p95_ms)} | {_format(trial.cpu_pct, 2)} |"
+    if not matched:
+        return []
+    lines = [
+        "",
+        "### Trial time by phase",
+        "",
+        "Values are mean ± sample SD across trials, from `execution.log` timestamps (one-second precision). Preparation includes fixture, source, service, and pre-test setup. Load test is the active Locust interval. Total spans the trial start and finish markers. Missing phase markers are omitted from that phase's mean; SD is N/A with one measurement.",
+        "",
+        "| Candidate | Trials | Preparation (s) | Locust startup (s) | Load test (s) | Locust shutdown (s) | Cleanup (s) | Total per trial (s) | Sum total (s) |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|",
+    ]
+    for candidate in sorted({trial.candidate for trial, _ in matched}):
+        candidate_timings = [
+            timing for trial, timing in matched if trial.candidate == candidate
+        ]
+        phases = " | ".join(
+            _mean_sd([timing.durations_s[phase] for timing in candidate_timings], 1)
+            for phase, _, _ in PHASES
         )
+        lines.append(
+            f"| {markdown_value(candidate)} | {len(candidate_timings)} | {phases} | "
+            f"{_mean_sd([timing.total_s for timing in candidate_timings], 1)} | "
+            f"{_format(sum(timing.total_s for timing in candidate_timings), 1)} |"
+        )
+    lines += [
+        "",
+        f"**Total time across {len(matched)} timed trials:** {_format(sum(timing.total_s for _, timing in matched) / 60, 2)} minutes.",
+    ]
+    if len(matched) < len(trials):
+        lines += [
+            "",
+            f"Timing unavailable for {len(trials) - len(matched)} trial(s) without complete start and finish markers.",
+        ]
+    return lines
+
+
+def _scenario_sections(execution_dir, scenario, trials, colors, timings):
     groups = defaultdict(list)
     for trial in trials:
         groups[trial.candidate].append(trial)
-    lines += [
+    lines = [
+        f"## {markdown_value(scenario)}",
         "",
         "### Candidate summaries",
         "",
-        (
-            "Each value is the median across runs, followed by the run range in parentheses. "
-            "Unavailable metrics are omitted from their summaries. Requests within a run are not independent trials."
-        ),
+        "Each value is the mean ± sample SD across runs (n − 1 denominator). Unavailable measurements are omitted; SD is N/A when only one run has a value. Requests within a run are not independent trials.",
         "",
-        "| Candidate | Trials | Requests/s | Mean latency (ms) | Median run p95 (ms) | Failure rate (%) | Mean DB CPU (%) |",
-        "|:--|--:|--:|--:|--:|--:|--:|",
+        "| Candidate | Trials | Requests | Failures | Failure rate (%) | Requests/s | Mean latency (ms) | Run p95 (ms) | Mean DB CPU (%) |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for candidate, candidate_trials in sorted(groups.items()):
         lines.append(
             f"| {markdown_value(candidate)} | {len(candidate_trials)} | "
-            f"{_spread(candidate_trials, 'rate', 2)} | "
-            f"{_spread(candidate_trials, 'mean_ms')} | "
-            f"{_spread(candidate_trials, 'p95_ms')} | "
-            f"{_spread(candidate_trials, 'failure_pct', 2)} | "
-            f"{_spread(candidate_trials, 'cpu_pct', 2)} |"
+            + " | ".join(
+                _mean_sd([getattr(trial, attribute) for trial in candidate_trials])
+                for attribute in (
+                    "requests",
+                    "failures",
+                    "failure_pct",
+                    "rate",
+                    "mean_ms",
+                    "p95_ms",
+                    "cpu_pct",
+                )
+            )
+            + " |"
         )
     names = sorted(groups)
     if len(names) > 1:
@@ -590,9 +682,9 @@ def _scenario_sections(execution_dir, scenario, trials, colors):
             "",
             f"### Candidate differences (relative to {markdown_value(baseline)})",
             "",
-            "Differences are candidate median minus baseline median. These are descriptive comparisons of runs, not confidence intervals.",
+            "Differences are candidate mean minus baseline mean. These are descriptive comparisons of runs, not confidence intervals.",
             "",
-            "| Candidate | Δ Requests/s | Δ Mean latency (ms) | Δ Median run p95 (ms) | Δ Failure rate (pp) | Δ Mean DB CPU (pp) |",
+            "| Candidate | Δ Requests/s | Δ Mean latency (ms) | Δ Run p95 (ms) | Δ Failure rate (pp) | Δ Mean DB CPU (pp) |",
             "|:--|--:|--:|--:|--:|--:|",
         ]
         for candidate in names[1:]:
@@ -626,6 +718,7 @@ def _scenario_sections(execution_dir, scenario, trials, colors):
             "",
             "Some runs have no run metadata, so their completion and configuration could not be verified.",
         ]
+    lines.extend(_timing_lines(trials, timings))
     task_summary, distribution = _task_summary_lines(
         execution_dir, scenario, groups, colors
     )
@@ -638,28 +731,24 @@ def _scenario_sections(execution_dir, scenario, trials, colors):
         "",
         (
             "Time zero is the recorded load start; older results use the first request start. "
-            "Lines show individual runs. Colors identify candidates; line patterns distinguish runs."
+            "Faint lines show individual runs in each candidate's color; thick lines show the pointwise median across runs observed at each time. The median is descriptive, with no extrapolation beyond a run's observed window."
         ),
         "",
     ]
     for metric, title, axis_label in _METRICS:
-        traces = []
+        chart_groups = []
         for candidate in names:
-            for index, trial in enumerate(groups[candidate]):
-                points = trial.series.get(metric)
-                if points:
-                    traces.append(
-                        (
-                            f"{candidate} / {trial.run_id}",
-                            colors[candidate],
-                            _DASHES[index % len(_DASHES)],
-                            points,
-                        )
-                    )
-        if traces:
+            runs = [
+                (trial.run_id, trial.series[metric])
+                for trial in groups[candidate]
+                if trial.series.get(metric)
+            ]
+            if runs:
+                chart_groups.append((candidate, colors[candidate], runs))
+        if chart_groups:
             safe_scenario = re.sub(r"[^A-Za-z0-9_-]+", "_", scenario)
             name = f"trials_{safe_scenario}_{metric}.svg"
-            _chart(execution_dir / name, axis_label, traces)
+            _chart(execution_dir / name, axis_label, chart_groups)
             graphs += [f"#### {title}", "", f"![{title}]({name})", ""]
     if not any(trial.series for trial in trials):
         graphs += ["No request timelines available.", ""]
@@ -726,6 +815,7 @@ def render_trial_report(
     groups = defaultdict(list)
     for trial in trials:
         groups[trial.scenario].append(trial)
+    timings = parse_execution_timings(execution_dir / "execution.log")
     lines = [
         "---",
         f"title: {json.dumps(f'Trial comparison: {execution_dir.name}')}",
@@ -756,7 +846,7 @@ def render_trial_report(
     for scenario, scenario_trials in sorted(groups.items()):
         scenario_trials.sort(key=lambda trial: trial.run_id)
         summary, scenario_graphs = _scenario_sections(
-            execution_dir, scenario, scenario_trials, colors
+            execution_dir, scenario, scenario_trials, colors, timings
         )
         lines.extend(summary)
         graphs.extend(scenario_graphs)

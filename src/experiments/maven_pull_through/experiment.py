@@ -3,8 +3,10 @@
 from pathlib import Path
 
 from pulp_juicer import (
+    CandidateConfig,
     ExperimentConfig,
     LoadConfig,
+    PreTestFunction,
     RequireFixture,
     ScenarioConfig,
 )
@@ -28,21 +30,33 @@ EXPERIMENT = ExperimentConfig(
         ),
     ),
     candidates=(
-        candidates.NormalCandidate(
+        CandidateConfig(
             id=1,
             name="normal",
             sources={
                 "pulpcore": "https://github.com/pulp/pulpcore.git#3.123.1",
                 "pulp_maven": "https://github.com/pulp/pulp_maven.git#0.37.0",
             },
+            pre_test_functions=[
+                PreTestFunction(
+                    description="Create Maven remote, repository, and distribution",
+                    setup_fn=candidates.setup_normal,
+                )
+            ],
         ),
-        candidates.StagingCandidate(
+        CandidateConfig(
             id=2,
             name="staging",
             sources={
                 "pulpcore": "../pulpcore",
                 "pulp_maven": "../pulp_maven",
             },
+            pre_test_functions=[
+                PreTestFunction(
+                    description="Create staging Maven remote, repository, and distribution",
+                    setup_fn=candidates.setup_staging,
+                )
+            ],
         ),
     ),
     scenarios=(
@@ -54,7 +68,7 @@ EXPERIMENT = ExperimentConfig(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            run_order=(1, 2),
+            run_order=(1, 2, 2, 1, 2, 2, 1, 1),
             load=LoadConfig(
                 users=1000,
                 request_count=1000,

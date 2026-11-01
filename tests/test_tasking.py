@@ -164,7 +164,10 @@ class TestTasking(unittest.TestCase):
             )
             self.assertNotIn("Started without terminal record", source)
             self.assertIn("| Completed without start record | 1 |", source)
-            self.assertIn("| maven.pull | 2 | 2 | 0 | 230.00 |", source)
+            frequent = source.split("##### Most frequent task types", 1)[1].split(
+                "##### Total execution time by task type", 1
+            )[0]
+            self.assertIn("| maven.pull | 2 | 2 | 0 | 280.00 |", frequent)
             self.assertIn("| core.cleanup | 1 | 0 | 1 | N/A |", source)
             self.assertIn("Total execution time by task type", source)
             self.assertIn(
@@ -243,7 +246,7 @@ class TestTasking(unittest.TestCase):
                 source_path = execution / "report.qmd"
                 source_path.write_text(
                     source_path.read_text().replace(
-                        "<!-- pulp-juicer-report-layout: 10 -->", ""
+                        "<!-- pulp-juicer-report-layout: 11 -->", ""
                     )
                 )
                 third = CliRunner().invoke(
@@ -259,7 +262,7 @@ class TestTasking(unittest.TestCase):
             self.assertIn(f"Existing:\n{execution / 'report.html'}", second.output)
             self.assertTrue((run_dir / "tasking.parquet").is_file())
             report_source = (execution / "report.qmd").read_text()
-            self.assertIn("<!-- pulp-juicer-report-layout: 10 -->", report_source)
+            self.assertIn("<!-- pulp-juicer-report-layout: 11 -->", report_source)
             self.assertIn("#### Pulp tasks", report_source)
             self.assertIn("Most frequent task types", report_source)
             self.assertIn("Total execution time by task type", report_source)
@@ -297,7 +300,7 @@ class TestTasking(unittest.TestCase):
             self.assertIn("### Pulp tasks", trial_source)
             self.assertIn("trials_burst_task_starts.svg", trial_source)
             self.assertIn("trials_burst_task_completions.svg", trial_source)
-            self.assertIn("trials_burst_wait_distribution.svg", trial_source)
+            self.assertIn("trials_burst_wait_boxplot.svg", trial_source)
 
     def test_incomplete_run_log_is_analyzed_without_locust_results(self):
         with tempfile.TemporaryDirectory() as tmp:

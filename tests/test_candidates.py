@@ -4,11 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from experiments.maven_pull_through.candidates import (
-    NormalCandidate,
-    StagingCandidate,
-    StagingManualCandidate,
-)
+from experiments.maven_pull_through.experiment import EXPERIMENT
 from pulp_juicer.types import PulpConnection, ServiceFixtureMetadata
 
 
@@ -22,26 +18,21 @@ class TestMavenCandidateSetup(unittest.TestCase):
             url="http://localhost:8080",
         )
         cases = (
-            (NormalCandidate, {"name": "loadtest-test"}),
             (
-                StagingCandidate,
+                EXPERIMENT.candidates[0].pre_test_functions[0].setup_fn,
+                {"name": "loadtest-test"},
+            ),
+            (
+                EXPERIMENT.candidates[1].pre_test_functions[0].setup_fn,
                 {
                     "name": "loadtest-test",
                     "staging_enabled": True,
                     "staging_autocommit": True,
                 },
             ),
-            (
-                StagingManualCandidate,
-                {
-                    "name": "loadtest-test",
-                    "staging_enabled": True,
-                    "staging_autocommit": False,
-                },
-            ),
         )
-        for candidate_type, expected_payload in cases:
-            with self.subTest(candidate=candidate_type.__name__):
+        for setup_fn, expected_payload in cases:
+            with self.subTest(expected_payload=expected_payload):
                 client = MagicMock()
                 client.wait_for_created_resource.side_effect = (
                     {"pulp_href": "/remote/"},
@@ -52,9 +43,7 @@ class TestMavenCandidateSetup(unittest.TestCase):
                     "experiments.maven_pull_through.candidates.PulpClient",
                     return_value=client,
                 ):
-                    candidate_type(id=1, name="test", sources={}).setup(
-                        PulpConnection(), {"maven": fixture}, "test"
-                    )
+                    setup_fn(PulpConnection(), {"maven": fixture}, "test")
                 repository_calls = [
                     call
                     for call in client.post.call_args_list

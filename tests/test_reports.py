@@ -15,10 +15,29 @@ from click.testing import CliRunner
 from pulp_juicer.cli import cli
 from pulp_juicer.report import completed_runs, render_report
 from pulp_juicer.tasking import TASK_SCHEMA
-from pulp_juicer.trial_report import _task_gantt, render_trial_report
+from pulp_juicer.trial_report import (
+    _mean_sd,
+    _median_curve,
+    _task_gantt,
+    render_trial_report,
+)
 
 
 class TestReportDiscovery(unittest.TestCase):
+    def test_mean_sd_uses_runs_as_observations(self):
+        self.assertEqual(_mean_sd([2, 4, 9]), "5.00\u00a0±\u00a03.61")
+        self.assertEqual(_mean_sd([4]), "4.00\u00a0±\u00a0N/A")
+
+    def test_median_curve_interpolates_without_extending_finished_runs(self):
+        runs = [
+            ("run001", [(0, 0), (2, 4)]),
+            ("run002", [(0, 2), (1, 4), (3, 8)]),
+        ]
+        self.assertEqual(
+            _median_curve(runs),
+            [(0, 1), (1, 3), (2, 5), (3, 8)],
+        )
+
     def test_task_gantt_uses_logged_duration_and_skips_partial_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "gantt.svg"
@@ -259,6 +278,21 @@ class TestReportDiscovery(unittest.TestCase):
                         run_dir / "tasking.parquet",
                     )
 
+            (execution / "execution.log").write_text(
+                "2026-01-01T00:00:00Z INFO Starting burst/run001 normal\n"
+                "2026-01-01T00:00:10Z INFO Pre-test hooks finished\n"
+                "2026-01-01T00:00:12Z INFO Load test started\n"
+                "2026-01-01T00:00:32Z INFO Load test stopped\n"
+                "2026-01-01T00:00:35Z INFO Post-test hooks started\n"
+                "2026-01-01T00:00:40Z INFO Finished burst/run001 normal: 2/2 requests\n"
+                "2026-01-01T01:00:00Z INFO Starting burst/run003 normal\n"
+                "2026-01-01T01:00:14Z INFO Pre-test hooks finished\n"
+                "2026-01-01T01:00:16Z INFO Load test started\n"
+                "2026-01-01T01:00:40Z INFO Load test stopped\n"
+                "2026-01-01T01:00:42Z INFO Post-test hooks started\n"
+                "2026-01-01T01:00:50Z INFO Finished burst/run003 normal: 2/2 requests\n"
+            )
+
             def fake_quarto(command, **kwargs):
                 (kwargs["cwd"] / "trials.html").write_text("<html>trials</html>")
 
@@ -275,41 +309,64 @@ class TestReportDiscovery(unittest.TestCase):
             self.assertEqual(report, execution / "trials.html")
             self.assertEqual(quarto.call_count, 1)
             source = (execution / "trials.qmd").read_text()
-            self.assertIn("| normal | 2 | 11.00 (10.00–12.00) |", source)
-            self.assertIn("| staging | 2 | 16.00 (15.00–17.00) |", source)
+            self.assertIn(
+                "| normal | 2 | 2.00\u00a0±\u00a00.00 | 0.00\u00a0±\u00a00.00 | 0.00\u00a0±\u00a00.00 | 11.00\u00a0±\u00a01.41 |",
+                source,
+            )
+            self.assertIn(
+                "| staging | 2 | 2.00\u00a0±\u00a00.00 | 0.00\u00a0±\u00a00.00 | 0.00\u00a0±\u00a00.00 | 16.00\u00a0±\u00a01.41 |",
+                source,
+            )
+            self.assertIn("### Trial time by phase", source)
+            self.assertIn(
+                "| normal | 2 | 12.0\u00a0±\u00a02.8 | 2.0\u00a0±\u00a00.0 | 22.0\u00a0±\u00a02.8 | 2.5\u00a0±\u00a00.7 | 6.5\u00a0±\u00a02.1 | 45.0\u00a0±\u00a07.1 | 90.0 |",
+                source,
+            )
+            self.assertIn("Total time across 2 timed trials:** 1.50 minutes", source)
+            self.assertIn("Timing unavailable for 2 trial(s)", source)
             self.assertIn("| staging | 5.00 | -25.00 | -60.00 |", source)
             self.assertIn("### Pulp tasks", source)
             self.assertIn(
-                "| normal | run001 | 1 | 1 | 0 | 1.00 | 1 | 1 | 230.00 | 230.00 | 1 | 100.00 | 100.00 |",
+                "| Candidate | Trials | Tasks | Completed | Failed | Throughput (tasks/s) | Median execution (ms) | Total execution (ms) | Median wait (ms) |",
                 source,
             )
-            self.assertIn("trials_burst_wait_distribution.svg", source)
+            self.assertIn(
+                "| normal | 2 | 1.00\u00a0±\u00a00.00 | 1.00\u00a0±\u00a00.00 | 0.00\u00a0±\u00a00.00 |",
+                source,
+            )
+            self.assertIn(
+                "| staging | 1 | 2.00\u00a0±\u00a0N/A | 2.00\u00a0±\u00a0N/A | 0.00\u00a0±\u00a0N/A |",
+                source,
+            )
+            self.assertNotIn("Sample variance", source)
+            self.assertNotIn("| normal | run001 |", source)
+            self.assertIn("trials_burst_wait_boxplot.svg", source)
             self.assertGreater(
-                source.index("trials_burst_wait_distribution.svg"),
+                source.index("trials_burst_wait_boxplot.svg"),
                 source.index("# Graphs"),
             )
-            wait_svg = execution / "trials_burst_wait_distribution.svg"
+            wait_svg = execution / "trials_burst_wait_boxplot.svg"
             ET.parse(wait_svg)
+            self.assertIn("normal (n=2)", wait_svg.read_text())
+            self.assertIn("staging (n=1)", wait_svg.read_text())
             self.assertIn(
-                "normal / run001: 1 of 1 tasks have wait data", wait_svg.read_text()
+                "run001: median 100.00 ms from 1 task waits", wait_svg.read_text()
             )
             self.assertIn(
-                "staging / run002: 1 of 2 tasks have wait data", wait_svg.read_text()
+                "Median dispatch-to-start wait per run (ms)", wait_svg.read_text()
             )
-            self.assertIn("Tasks with wait data (count)", wait_svg.read_text())
-            self.assertIn("Dispatch-to-start wait (ms)", wait_svg.read_text())
+            self.assertEqual(wait_svg.read_text().count("<circle"), 3)
             self.assertNotIn("<polyline", wait_svg.read_text())
             self.assertNotIn("No terminal record", source)
-            self.assertIn("| normal | maven.pull | 2 | 2 | 0 | 230.00 |", source)
+            frequent = source.split("#### Most frequent task types", 1)[1].split(
+                "#### Total execution time by task type", 1
+            )[0]
+            self.assertIn("| normal | maven.pull | 2 | 2 | 0 | 460.00 |", frequent)
             self.assertIn("| Candidate | Task type | Total execution (ms) |", source)
             self.assertIn("| staging | maven.pull | 280.00 |", source)
             self.assertLess(
                 source.index("#### Total execution time by task type"),
                 source.index("# Graphs"),
-            )
-            self.assertLess(
-                source.index("| staging | run002 |"),
-                source.index("| normal | run003 |"),
             )
             self.assertLess(
                 source.rfind("### Candidate summaries"), source.index("# Graphs")
@@ -335,6 +392,10 @@ class TestReportDiscovery(unittest.TestCase):
                     if metric.startswith("task_")
                     else "staging / run004",
                     svg.read_text(),
+                )
+                self.assertIn('data-series="median"', svg.read_text())
+                self.assertIn(
+                    'stroke-opacity="0.22" data-series="run"', svg.read_text()
                 )
             self.assertIn("Time since load start (s)", svg.read_text())
             for candidate, count in (("normal", 2), ("staging", 2)):
@@ -367,7 +428,7 @@ class TestReportDiscovery(unittest.TestCase):
 
             source_path = execution / "trials.qmd"
             source_path.write_text(
-                source.replace("<!-- pulp-juicer-trial-layout: 13 -->", "")
+                source.replace("<!-- pulp-juicer-trial-layout: 21 -->", "")
             )
             with (
                 patch(
@@ -380,7 +441,7 @@ class TestReportDiscovery(unittest.TestCase):
                 self.assertEqual(render_trial_report(execution), report)
             refreshed.assert_called_once()
             self.assertIn(
-                "<!-- pulp-juicer-trial-layout: 13 -->", source_path.read_text()
+                "<!-- pulp-juicer-trial-layout: 21 -->", source_path.read_text()
             )
 
     def test_existing_report_needs_no_quarto(self):
