@@ -1,49 +1,38 @@
 # pulp-juicer
 
-`pulp-juicer` is a Python package and CLI for declaring, planning, and running Pulp load-test experiments. Experiment definitions live under `src/experiments/`; the package builds their fixtures, manages Compose services, runs Locust measurements, records results, and renders reports.
+Run Pulp load-test experiments and compare candidates through generated reports.
 
-## Setup
+## Install
 
-Install [uv](https://docs.astral.sh/uv/) and Docker Compose. Provide a pulpcore checkout at `../pulpcore`; candidate plugin sources are configured in each experiment. Then install the package and report dependencies:
-
-```bash
-make setup
-```
-
-## Use
+You need Python 3.12, [uv](https://docs.astral.sh/uv/), and Docker Compose.
+The staging candidate uses sibling checkouts at `../pulpcore` and `../pulp_maven`.
 
 ```bash
-make ls
-uv run --locked pulp-juicer squeeze
-uv run --locked pulp-juicer show bucket-repository
-uv run --locked pulp-juicer squeeze bucket-repository
-uv run --locked pulp-juicer squeeze bucket-repository burst
-uv run --locked pulp-juicer squeeze bucket-repository burst staging
-uv run --locked pulp-juicer squeeze bucket-repository --run
-uv run --locked pulp-juicer squeeze bucket-repository burst --run -s 3
-uv run --locked pulp-juicer squeeze bucket-repository burst staging --run
-uv run --locked pulp-juicer report
-uv run --locked pulp-juicer results bucket-repository
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e . --group report
 ```
 
-`squeeze` without an experiment lists available experiments and shows usage. With an experiment, it lists candidates and scenarios; add a scenario to inspect its sample count or a candidate to inspect sources and settings. Add `--run` to execute the selected experiment, scenario, or one ad-hoc candidate measurement. Use `-s N` on experiment or scenario executions to sample every candidate N times. The `tmp` scenario is a draft and runs only when selected explicitly. Each execution gets a numbered ID and a result directory under `_juice/`, including `execution.log` for process events. The plan runs in memory; add `--save-plan` to write its JSON file. Use `-f` to replace the latest execution for the selected scope. Generated fixtures are also stored under `_juice/`. Before teardown, a collector saves Pulp database tasks to `collectors/tasking.parquet`; Compose logs remain available for debugging. After `squeeze --run` finishes, it generates reports for completed measurements. `report` creates a detailed `report.html`, a run-level `trials.html`, and a self-contained `interactive.html` with uPlot timelines arranged side by side by candidate. Select one run per candidate; cursors synchronize across charts in a scenario. Charts are grouped into request, task, and PostgreSQL activity; content-worker storage; and API-worker and temporary-file activity. The request chart appears first in the last group too. The request chart combines new requests/s, completed requests/s, and cumulative completed requests on a separate axis. The task chart combines tasks started/s and completed/s. PostgreSQL CPU and memory, content-worker read and write, API-worker CPU and memory, API-worker read and write, and temporary-file count and size each share a chart. A faint shaded band spans the first request start through the final request completion, with subtle lines at its boundaries. Pass an execution ID to report only that execution; omit it to list executions. `results` prints the experiment's run directories and generated report files.
-
-For an ad-hoc candidate run, add `--post-debug` to keep its Compose services running after the test. Squeeze prints `COMPOSE_PROJECT_NAME` and `COMPOSE_FILE` exports followed by commands to inspect the service, open a shell, query Pulp, follow logs, and remove the project when finished. For example: `pulp-juicer squeeze bucket-repository burst normal --run --post-debug`.
-
-The bucket repository experiment and its source settings are documented in [its README](src/experiments/bucket_repository/README.md). Each candidate supplies the pulpcore and plugin sources required by the experiment. Set `COMPOSE` to override the default `docker compose` command. `uv run --locked pulp-juicer ps` lists active experiment services. Use `pulp-juicer clean services`, `clean results`, `clean fixtures`, or `clean all`; selections such as `clean results,fixtures` are also supported. `all` keeps saved plan files.
-
-## Interactive summary statistics
-
-The interactive report lists each measured variable, its observation unit, and its available statistics above the timelines. Use **Selected run** for counts, mean, population SD, median, p95, p99, and maximum within one run; applicable rows also show totals or percentages. Use **Across runs** for the mean, sample SD, median, minimum, and maximum of each run statistic. Every run has equal weight and each field shows the number of runs with data. A single run has no across-run SD.
-
-Request rate bins cover the first request start through the last completion. Task rate bins cover the observed task event window, including drain time. Collector readings are weighted by their observed interval overlapping the request window; resource percentiles describe time occupancy. Rate totals integrate the observed intervals. Trial phases are one duration per run. Missing data appear as N/A. Cumulative completed requests are represented by the completed-request total, not percentiles of the rising curve.
-
-## Development
+## Run an experiment
 
 ```bash
-make format
-make lint
-make test
+pulp-juicer squeeze bucket-repository
+pulp-juicer squeeze bucket-repository pull-through-1k-impulse
+pulp-juicer squeeze bucket-repository pull-through-1k-impulse --run
 ```
 
-See [architecture](docs/architecture.md) for the package design.
+The first two commands show the available candidates and scenarios without running them.
+Add `-s N` to a `--run` command to use N samples per candidate, or name a candidate before `--run` for one ad-hoc measurement.
+Run `pulp-juicer squeeze --help` for all options.
+
+Executions write data and a ZIP archive under `_juice/executions/`.
+Completed measurements also produce HTML reports.
+To find or regenerate a report:
+
+```bash
+pulp-juicer report
+pulp-juicer report bucket-repository__pull-through-1k-impulse__001 --archive
+```
+
+See the [bucket repository experiment](src/experiments/bucket_repository/README.md) for candidate and scenario details.
+The [AI-oriented architecture reference](docs/architecture.md) contains implementation context for coding agents.

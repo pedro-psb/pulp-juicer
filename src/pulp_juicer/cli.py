@@ -233,18 +233,18 @@ def show_experiment(experiment_id):
     "--quarto", "quarto_command", envvar="QUARTO", default="quarto", show_default=True
 )
 @click.option(
-    "--zip",
-    "zip_reports",
+    "--archive",
+    "archive_reports",
     is_flag=True,
     help="Archive reports and source data per execution.",
 )
-def report_results(execution_id, results_dir, quarto_command, zip_reports):
+def report_results(execution_id, results_dir, quarto_command, archive_reports):
     """List execution IDs, or render the reports for one execution."""
     from pyarrow import ArrowException
 
     if execution_id is None:
-        if zip_reports:
-            raise click.UsageError("--zip requires EXECUTION_ID")
+        if archive_reports:
+            raise click.UsageError("--archive requires EXECUTION_ID")
         executions = (
             sorted(
                 path.name
@@ -283,7 +283,6 @@ def report_results(execution_id, results_dir, quarto_command, zip_reports):
                 r".+__\d{3,}", execution_dir.name
             ):
                 continue
-            has_report = False
             for name, renderer in (
                 ("report.html", render_report),
                 ("trials.html", render_trial_report),
@@ -297,13 +296,12 @@ def report_results(execution_id, results_dir, quarto_command, zip_reports):
                     else renderer(execution_dir, quarto_command)
                 )
                 if report is not None:
-                    has_report = True
                     unchanged = (
                         previous_time is not None
                         and output.stat().st_mtime_ns == previous_time
                     )
                     (existing_reports if unchanged else new_reports).append(report)
-            if zip_reports and has_report:
+            if archive_reports:
                 archive, refreshed = archive_execution(execution_dir)
                 (new_archives if refreshed else existing_archives).append(archive)
     except (
@@ -316,7 +314,6 @@ def report_results(execution_id, results_dir, quarto_command, zip_reports):
         raise click.ClickException(str(exc)) from exc
     if not new_reports and not existing_reports:
         click.echo(f"No completed runs found under {results_dir}")
-        return
     for title, reports in (
         ("New Reports", new_reports),
         ("Existing", existing_reports),
@@ -327,7 +324,7 @@ def report_results(execution_id, results_dir, quarto_command, zip_reports):
             click.echo(f"{title}:")
             for report in reports:
                 click.echo(report)
-    if zip_reports:
+    if archive_reports:
         for title, archives in (
             ("New Archives", new_archives),
             ("Existing Archives", existing_archives),
@@ -779,15 +776,14 @@ def squeeze(
         click.echo(f"\nResults: {plan.results_dir}")
     if post_debug:
         _print_post_debug_commands(plan)
-    if any((run.result_dir / "run_metadata.json").is_file() for run in plan.runs):
-        click.echo()
-        click.get_current_context().invoke(
-            report_results,
-            execution_id=selected_id,
-            results_dir=plan.results_dir.parent,
-            quarto_command=os.environ.get("QUARTO", "quarto"),
-            zip_reports=False,
-        )
+    click.echo()
+    click.get_current_context().invoke(
+        report_results,
+        execution_id=selected_id,
+        results_dir=plan.results_dir.parent,
+        quarto_command=os.environ.get("QUARTO", "quarto"),
+        archive_reports=True,
+    )
     if incomplete:
         raise click.ClickException("One or more runs were incomplete")
 

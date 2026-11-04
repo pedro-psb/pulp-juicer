@@ -63,7 +63,7 @@ uv run --locked pulp-juicer squeeze bucket-repository burst --run -s 3
 uv run --locked pulp-juicer squeeze bucket-repository burst normal --run
 uv run --locked --group report pulp-juicer report
 uv run --locked --group report pulp-juicer report bucket-repository__burst__001
-uv run --locked --group report pulp-juicer report bucket-repository__burst__001 --zip
+uv run --locked --group report pulp-juicer report bucket-repository__burst__001 --archive
 ```
 
 Without `--run`, the command lists the selected scope. A candidate execution produces one ad-hoc measurement.

@@ -103,7 +103,7 @@ def write_api_samples(run_dir):
 
 
 class TestReportDiscovery(unittest.TestCase):
-    def test_squeeze_generates_reports_after_execution(self):
+    def test_squeeze_generates_and_archives_reports_after_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
             calls = []
@@ -130,7 +130,9 @@ class TestReportDiscovery(unittest.TestCase):
             def fake_render(name):
                 def render(execution_dir, *args):
                     calls.append(name)
-                    return execution_dir / name
+                    output = execution_dir / name
+                    output.write_text(name)
+                    return output
 
                 return render
 
@@ -164,6 +166,22 @@ class TestReportDiscovery(unittest.TestCase):
             )
             self.assertIn("New Reports:", response.output)
             self.assertIn("interactive.html", response.output)
+            execution_dir = (
+                workdir
+                / "executions"
+                / "bucket-repository__pull-through-1k-impulse__normal__001"
+            )
+            archive = execution_dir.with_suffix(".zip")
+            self.assertIn(f"New Archives:\n{archive}", response.output)
+            with zipfile.ZipFile(archive) as bundle:
+                self.assertTrue(
+                    {
+                        f"{execution_dir.name}/report.html",
+                        f"{execution_dir.name}/trials.html",
+                        f"{execution_dir.name}/interactive.html",
+                        f"{execution_dir.name}/execution.log",
+                    }.issubset(bundle.namelist())
+                )
 
     def test_interactive_report_groups_runs_and_embeds_series_safely(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -563,7 +581,27 @@ class TestReportDiscovery(unittest.TestCase):
             )
             render.assert_not_called()
 
-    def test_report_zip_contains_reports_and_source_data_and_reuses_archive(self):
+    def test_archive_keeps_execution_log_without_completed_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp) / "executions"
+            execution = results / "bucket-repository__001"
+            execution.mkdir(parents=True)
+            (execution / "execution.log").write_text("execution stopped\n")
+            response = CliRunner().invoke(
+                cli,
+                ["report", execution.name, "--results", str(results), "--archive"],
+            )
+            self.assertEqual(response.exit_code, 0, response.output)
+            self.assertIn("No completed runs found", response.output)
+            archive = results / f"{execution.name}.zip"
+            self.assertIn(f"New Archives:\n{archive}", response.output)
+            with zipfile.ZipFile(archive) as bundle:
+                self.assertEqual(
+                    bundle.read(f"{execution.name}/execution.log"),
+                    b"execution stopped\n",
+                )
+
+    def test_report_archive_contains_reports_and_source_data_and_reuses_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp) / "results"
             execution = results / "bucket-repository__001"
@@ -575,7 +613,7 @@ class TestReportDiscovery(unittest.TestCase):
             (execution / "execution.log").write_text("run log")
             (run_dir / "requests.csv").write_text("request data")
             (collectors / "api_worker.parquet").write_bytes(b"parquet data")
-            args = ["report", execution.name, "--results", str(results), "--zip"]
+            args = ["report", execution.name, "--results", str(results), "--archive"]
             with (
                 patch(
                     "pulp_juicer.cli.render_report",

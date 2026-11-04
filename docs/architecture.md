@@ -1,4 +1,6 @@
-# Architecture
+# Architecture (AI-oriented reference)
+
+This document is organized as technical context for AI coding agents, not as a human-facing guide.
 
 ```text
 experiments/* -> ls; show -> available experiments
@@ -39,6 +41,6 @@ Before teardown, the on-demand collector snapshots task rows from Pulp's Postgre
 
 Run measurements use Parquet. Locust CSV exports remain under each run’s `raw/` directory and are converted to Parquet before analysis. Graph SVGs live under `graphs/` in the run or execution directory. `execution.log` remains for diagnostics; `timings.parquet` holds phase measurements for reports.
 
-`squeeze --run` generates reports for completed measurements when the execution finishes. `report` lists available execution IDs. `report <execution_id>` generates or reuses that execution's reports; add `--zip` to archive its reports and source data. The separate `interactive.html` embeds uPlot for one selectable run per candidate in side-by-side columns. The first group contains request, task, and combined PostgreSQL CPU and memory charts; a combined content-worker read and write chart follows. The last group repeats request activity, then combines API-worker CPU with memory, API-worker read with write, and temporary-file count with size. Charts share an elapsed-time cursor within each scenario and shade the interval from the first request start to the last request completion, with fixed lines at those boundaries. The report works offline.
+`squeeze --run` generates reports for completed measurements and archives the execution when it finishes. `report` lists available execution IDs. `report <execution_id>` generates or reuses that execution's reports; add `--archive` to archive its reports and source data. The separate `interactive.html` embeds uPlot for one selectable run per candidate in side-by-side columns. The first group contains request, task, and combined PostgreSQL CPU and memory charts; a combined content-worker read and write chart follows. The last group repeats request activity, then combines API-worker CPU with memory, API-worker read with write, and temporary-file count with size. Charts share an elapsed-time cursor within each scenario and shade the interval from the first request start to the last request completion, with fixed lines at those boundaries. The report works offline.
 
 `summary_statistics.py` declares the random variables and computes per-run summaries from normalized request, task, collector, and trial-timing rows. Event measurements use population SD and interpolated percentiles. Collector measurements use interval overlap with the request window as weights; their quantiles are time-occupancy quantiles. Candidate summaries take each available run statistic as one observation and use sample SD. The browser switches between selected-run and candidate summaries without recomputing the statistics. The interactive report cache tracks the summary module and execution timings.
