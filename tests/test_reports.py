@@ -1,6 +1,8 @@
 """Each execution has its own report, rendered only once."""
 
 import itertools
+import json
+import re
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -16,6 +18,7 @@ from click.testing import CliRunner
 
 from pulp_juicer.cli import cli
 from pulp_juicer.collector.task_db import TASK_SCHEMA
+from pulp_juicer.interactive_report import render_interactive_report
 from pulp_juicer.report import completed_runs, prepare_run, render_report
 from pulp_juicer.trial_report import (
     _mean_sd,
@@ -100,6 +103,206 @@ def write_api_samples(run_dir):
 
 
 class TestReportDiscovery(unittest.TestCase):
+    def test_interactive_report_groups_runs_and_embeds_series_safely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            execution = Path(tmp) / "example__001"
+            for candidate, run_id in (
+                ("normal", "run001"),
+                ("normal", "run003"),
+                ("staging", "run002"),
+            ):
+                run = execution / "burst" / candidate / run_id
+                run.mkdir(parents=True)
+                (run / "locust_stats.csv").write_text(
+                    "Name,Request Count,Failure Count,Requests/s,Average Response Time,95%\n"
+                    "Aggregated,1,0,1,10,20\n"
+                )
+                (run / "run_metadata.json").write_text(
+                    '{"result":{"load_start_utc":"2026-01-01T00:00:00+00:00"}}'
+                )
+                requests = (
+                    "2026-01-01T00:00:02.250000+00:00,2026-01-01T00:00:03.750000+00:00\n"
+                    if candidate == "staging"
+                    else "2026-01-01T00:00:00+00:00,2026-01-01T00:00:01+00:00\n"
+                )
+                (run / "requests.csv").write_text(
+                    "started_at_utc,completed_at_utc\n" + requests
+                )
+                write_postgres_samples(run, 35)
+                if candidate == "staging":
+                    write_api_samples(run)
+                    write_content_samples(run)
+                    start = datetime(2026, 1, 1, tzinfo=UTC)
+                    pq.write_table(
+                        pa.Table.from_pylist(
+                            [
+                                {
+                                    "task_id": "task-1",
+                                    "task_type": "maven.pull",
+                                    "status": "completed",
+                                    "started_at_utc": start + timedelta(seconds=1),
+                                    "finished_at_utc": start + timedelta(seconds=2),
+                                }
+                            ],
+                            schema=TASK_SCHEMA,
+                        ),
+                        run / "collectors" / "tasking.parquet",
+                    )
+            report = render_interactive_report(execution)
+            self.assertEqual(report, (execution / "interactive.html").resolve())
+            source = report.read_text()
+            payload = re.search(
+                r'<script id="report-data" type="application/json">(.*?)</script>',
+                source,
+                re.DOTALL,
+            ).group(1)
+            data = json.loads(payload)
+            self.assertEqual(
+                [
+                    (group["title"], [metric["key"] for metric in group["metrics"]])
+                    for group in data["groups"]
+                ],
+                [
+                    (
+                        "Request, Tasks and Postgres activity",
+                        ["requests", "tasks", "postgres"],
+                    ),
+                    ("Content-worker storage", ["content_storage"]),
+                    (
+                        "API-worker and temporary-file activity",
+                        ["requests", "api_resources", "api_storage", "temporary_files"],
+                    ),
+                ],
+            )
+            requests = data["groups"][0]["metrics"][0]
+            self.assertEqual(
+                (
+                    requests["primary"],
+                    requests["secondary"],
+                    requests["secondaryScale"],
+                ),
+                ("starts", "throughput", "y"),
+            )
+            tasks = data["groups"][0]["metrics"][1]
+            self.assertEqual(
+                (tasks["primary"], tasks["secondary"], tasks["secondaryScale"]),
+                ("task_starts", "task_completions", "y"),
+            )
+            postgres = data["groups"][0]["metrics"][-1]
+            self.assertEqual(
+                (postgres["primary"], postgres["secondary"]), ("cpu", "memory")
+            )
+            content = data["groups"][1]["metrics"][0]
+            self.assertEqual(
+                (content["primary"], content["secondary"], content["secondaryScale"]),
+                ("content_read", "content_write", "y"),
+            )
+            api_group = data["groups"][2]["metrics"]
+            self.assertEqual(api_group[0], requests)
+            self.assertEqual(
+                [
+                    (metric["primary"], metric["secondary"], metric["secondaryScale"])
+                    for metric in api_group[1:]
+                ],
+                [
+                    ("api_cpu", "api_memory", "api_memory"),
+                    ("api_read", "api_write", "y"),
+                    ("temp_files", "temp_bytes", "temp_size"),
+                ],
+            )
+            scenario = data["scenarios"][0]
+            self.assertEqual(scenario["name"], "burst")
+            self.assertEqual(
+                [candidate["name"] for candidate in scenario["candidates"]],
+                ["normal", "staging"],
+            )
+            self.assertEqual(
+                [run["run"] for run in scenario["candidates"][0]["runs"]],
+                ["run001", "run003"],
+            )
+            self.assertEqual(
+                scenario["candidates"][1]["runs"][0]["series"]["completed"],
+                [[0, 0], [1, 0], [2, 0], [3, 1], [4, 1]],
+            )
+            self.assertEqual(
+                scenario["candidates"][1]["runs"][0]["series"]["starts"],
+                [[0, 0], [1, 0], [2, 1], [3, 0], [4, 0]],
+            )
+            self.assertEqual(
+                scenario["candidates"][1]["runs"][0]["series"]["throughput"],
+                [[0, 0], [1, 0], [2, 0], [3, 1], [4, 0]],
+            )
+            self.assertEqual(
+                scenario["candidates"][1]["runs"][0]["series"]["cpu"],
+                [[0, 35.0], [1, 35.0]],
+            )
+            self.assertEqual(
+                scenario["candidates"][1]["runs"][0]["series"]["memory"],
+                [[0, 64.0], [1, 64.0]],
+            )
+            self.assertEqual(
+                scenario["candidates"][1]["runs"][0]["series"]["task_starts"],
+                [[0, 0], [1, 1]],
+            )
+            self.assertEqual(
+                scenario["candidates"][1]["runs"][0]["series"]["task_completions"],
+                [[0, 0], [1, 0], [2, 1]],
+            )
+            self.assertTrue(
+                all(
+                    scenario["candidates"][1]["runs"][0]["series"].get(key)
+                    for key in (
+                        "content_read",
+                        "content_write",
+                        "api_cpu",
+                        "api_memory",
+                        "api_read",
+                        "api_write",
+                        "temp_files",
+                        "temp_bytes",
+                    )
+                )
+            )
+            self.assertEqual(
+                scenario["candidates"][1]["runs"][0]["markers"],
+                {"start": 2.25, "end": 3.75},
+            )
+            self.assertEqual(
+                scenario["candidates"][0]["runs"][0]["markers"],
+                {"start": 0.0, "end": 1.0},
+            )
+            variables = {variable["key"]: variable for variable in data["variables"]}
+            self.assertEqual(variables["request_latency"]["unit"], "request")
+            self.assertEqual(variables["pg_cpu"]["unit"], "collector interval")
+            normal = scenario["candidates"][0]
+            self.assertEqual(
+                normal["runs"][0]["statistics"]["request_starts"]["total"], 1
+            )
+            self.assertEqual(normal["runs"][0]["statistics"]["pg_cpu"]["mean"], 35)
+            self.assertEqual(normal["statistics"]["request_starts"]["total"]["n"], 2)
+            self.assertEqual(normal["statistics"]["request_starts"]["total"]["mean"], 1)
+            staging_stats = scenario["candidates"][1]["runs"][0]["statistics"]
+            self.assertEqual(staging_stats["task_status"]["counts"], {"completed": 1})
+            self.assertEqual(
+                staging_stats["task_status"]["percentages"], {"completed": 100}
+            )
+            self.assertNotIn(
+                "pg_cpu", staging_stats
+            )  # Samples precede this input window.
+            self.assertIn("Summary statistics", source)
+            self.assertIn("Across runs", source)
+            self.assertIn("drawClear: [drawInputWindow", source)
+            self.assertIn("draw: [drawMarkers", source)
+            self.assertIn("Input ends (all requests completed)", source)
+            self.assertIn("key: `scenario-${scenarioIndex}`", source)
+            self.assertIn('scales: ["x", null]', source)
+            self.assertIn('selector.addEventListener("change"', source)
+            self.assertIn("uPlot 1.6.32 license", source)
+            self.assertNotIn("cdn.jsdelivr.net", source)
+            previous_time = report.stat().st_mtime_ns
+            self.assertEqual(render_interactive_report(execution), report)
+            self.assertEqual(report.stat().st_mtime_ns, previous_time)
+
     def test_individual_timelines_draw_new_requests_as_lines_on_all_charts(self):
         with tempfile.TemporaryDirectory() as tmp:
             execution = Path(tmp)
@@ -451,6 +654,7 @@ class TestReportDiscovery(unittest.TestCase):
                         "New Reports:",
                         str(execution / "report.html"),
                         str(execution / "trials.html"),
+                        str(execution / "interactive.html"),
                     ],
                 )
             for execution in (first, second):

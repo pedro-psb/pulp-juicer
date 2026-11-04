@@ -20,6 +20,7 @@ from .compose_runtime import ComposeRuntime
 from .execution import execute_test_plan
 from .execution_ids import EXECUTIONS_DIRNAME, latest_execution_id, next_execution_id
 from .execution_log import ExecutionLog
+from .interactive_report import render_interactive_report
 from .plan import build_test_plan, execution_scope, resolve_workdir
 from .plan_file import write_plan_file
 from .report import render_report
@@ -230,10 +231,15 @@ def report_results(execution_id, results_dir, quarto_command, zip_reports):
             for name, renderer in (
                 ("report.html", render_report),
                 ("trials.html", render_trial_report),
+                ("interactive.html", render_interactive_report),
             ):
                 output = execution_dir / name
                 previous_time = output.stat().st_mtime_ns if output.is_file() else None
-                report = renderer(execution_dir, quarto_command)
+                report = (
+                    renderer(execution_dir)
+                    if renderer is render_interactive_report
+                    else renderer(execution_dir, quarto_command)
+                )
                 if report is not None:
                     has_report = True
                     unchanged = (
@@ -315,7 +321,13 @@ def list_results(experiment_id, workdir):
                 or not re.fullmatch(r".+__\d{3,}", execution_dir.name)
             ):
                 continue
-            for name in ("report.html", "report.qmd", "trials.html", "trials.qmd"):
+            for name in (
+                "report.html",
+                "report.qmd",
+                "trials.html",
+                "trials.qmd",
+                "interactive.html",
+            ):
                 report_file = execution_dir / name
                 if report_file.is_file():
                     _print_styled((report_file, "magenta"))
