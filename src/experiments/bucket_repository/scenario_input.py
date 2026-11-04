@@ -38,6 +38,39 @@ def build_pull_through(
     }
 
 
+def build_pull_through_repeated(
+    fixtures: Mapping[str, ServiceFixtureMetadata],
+    candidate: dict,
+    load: UnitaryImpulseLoad | StepFunctionLoad,
+) -> dict:
+    """Repeat the same 100 artifact requests in ten ordered blocks."""
+    if load.request_count != 1000:
+        raise ValueError("Repeated pull-through needs exactly 1,000 requests")
+    fixture = fixtures["maven"]
+    manifest = json.loads((fixture.output_dir / "manifest.json").read_text())
+    artifacts = manifest["artifacts"][:100]
+    if (
+        len(artifacts) != 100
+        or len({artifact["path"] for artifact in artifacts}) != 100
+    ):
+        raise ValueError("Repeated pull-through needs 100 unique fixture artifacts")
+    return {
+        "base_url": candidate["base_url"].rstrip("/"),
+        "requests": [
+            {
+                "path": artifact["path"],
+                "name": "bucket-repository",
+                "expected_status": 200,
+                "sha256": artifact["sha256"],
+            }
+            for _ in range(10)
+            for artifact in artifacts
+        ],
+        "wait_seconds": load.wait_seconds,
+        "request_timeout_seconds": load.request_timeout_seconds,
+    }
+
+
 def build_upload(
     fixtures: Mapping[str, ServiceFixtureMetadata],
     candidate: dict,

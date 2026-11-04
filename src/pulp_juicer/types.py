@@ -163,6 +163,17 @@ class ScenarioConfig:
     run_order: tuple[int, ...]
     load: LoadProfile
     requires: tuple[RequireFixture, ...] = ()
+    draft: bool = False
+
+    def __post_init__(self):
+        if (
+            not isinstance(self.run_order, tuple)
+            or not self.run_order
+            or any(type(candidate) is not int for candidate in self.run_order)
+        ):
+            raise ValueError(
+                "Scenario run_order must be a nonempty tuple of candidate IDs"
+            )
 
 
 @dataclass(frozen=True)

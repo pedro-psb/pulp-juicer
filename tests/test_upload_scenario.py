@@ -6,12 +6,48 @@ import unittest
 from pathlib import Path
 
 from experiments.bucket_repository.experiment import EXPERIMENT
-from experiments.bucket_repository.scenario_input import build_upload
+from experiments.bucket_repository.scenario_input import (
+    build_pull_through_repeated,
+    build_upload,
+)
+from pulp_juicer import sample_sequence
 from pulp_juicer.plan import build_test_plan
 from pulp_juicer.types import ServiceFixtureMetadata, UnitaryImpulseLoad
 
 
 class TestUploadScenario(unittest.TestCase):
+    def test_repeated_pull_through_uses_the_same_100_resources_ten_times(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            artifacts = [
+                {"path": f"artifact-{index:03d}.jar", "sha256": f"hash-{index}"}
+                for index in range(100)
+            ]
+            (directory / "manifest.json").write_text(
+                json.dumps({"artifacts": artifacts})
+            )
+            fixture = ServiceFixtureMetadata(
+                "maven",
+                directory / "compose.yaml",
+                "fixture",
+                directory,
+                "http://fixture",
+            )
+            requests = build_pull_through_repeated(
+                {"maven": fixture},
+                {"base_url": "http://pulp/"},
+                UnitaryImpulseLoad(request_count=1000),
+            )["requests"]
+            self.assertEqual(len(requests), 1000)
+            for block in range(10):
+                self.assertEqual(
+                    [
+                        item["path"]
+                        for item in requests[block * 100 : (block + 1) * 100]
+                    ],
+                    [item["path"] for item in artifacts],
+                )
+
     def test_upload_and_pull_through_share_fixture_directory(self):
         compose = (
             Path(__file__).resolve().parents[1]
@@ -29,7 +65,7 @@ class TestUploadScenario(unittest.TestCase):
                 EXPERIMENT,
                 compose,
                 repository_root=root,
-                scenario_id="short-impulse",
+                scenario_id="pull-through-1k-impulse",
             )
             self.assertEqual(
                 upload.runs[0].fixtures["maven"].output_dir,
@@ -44,7 +80,10 @@ class TestUploadScenario(unittest.TestCase):
         )
         self.assertEqual(scenario.driver, "http_upload")
         self.assertEqual(scenario.load.request_count, 100)
-        self.assertEqual(scenario.run_order, (1, 2))
+        self.assertEqual(
+            scenario.run_order,
+            sample_sequence(len(scenario.run_order) // 2, (1, 2)),
+        )
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             paths = [

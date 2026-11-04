@@ -5,6 +5,7 @@ from .execution import execute_test_plan
 from .locust_driver import run as run_locust
 from .plan import RunMetadata, RunResultMetadata, TestPlanMetadata, build_test_plan
 from .plan_file import load_plan_file, write_plan_file
+from .sample_sequence import sample_sequence
 from .types import (
     CandidateConfig,
     ExperimentConfig,
@@ -44,6 +45,7 @@ __all__ = [
     "VolumeFixture",
     "VolumeFixtureMetadata",
     "build_test_plan",
+    "sample_sequence",
     "execute_test_plan",
     "load_plan_file",
     "run_locust",

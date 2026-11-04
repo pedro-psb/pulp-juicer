@@ -2,12 +2,12 @@
 
 import hashlib
 import json
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .execution_ids import EXECUTIONS_DIRNAME
+from .sample_sequence import sample_sequence
 from .types import (
     CandidateConfig,
     ExperimentConfig,
@@ -90,12 +90,27 @@ def resolve_workdir(
 
 
 def execution_scope(
-    experiment_id: str, scenario_id: str | None = None, run_id: str | None = None
+    experiment_id: str, scenario_id: str | None = None, candidate: str | None = None
 ) -> str:
-    """Name the experiment, scenario, or run selected for an execution."""
-    if run_id is not None and scenario_id is None:
-        raise ValueError("A run ID requires a scenario")
-    return "__".join(part for part in (experiment_id, scenario_id, run_id) if part)
+    """Name the experiment, scenario, or ad-hoc candidate execution."""
+    if candidate is not None and scenario_id is None:
+        raise ValueError("A candidate requires a scenario")
+    return "__".join(part for part in (experiment_id, scenario_id, candidate) if part)
+
+
+def resolve_run_order(
+    scenario: ScenarioConfig, candidate_ids: tuple[int, ...], samples: int | None = None
+) -> tuple[int, ...]:
+    """Resolve a configured sequence, or regenerate one for a sample override."""
+    if samples is not None:
+        order = sample_sequence(samples, candidate_ids)
+    else:
+        order = scenario.run_order
+    if not order:
+        raise ValueError(f"Empty run order in {scenario.id}")
+    if any(type(entry) is not int or entry not in candidate_ids for entry in order):
+        raise ValueError(f"Invalid candidate ID in {scenario.id}")
+    return order
 
 
 def _fixtures(scenario: ScenarioConfig, experiment: ExperimentConfig, workdir: Path):
@@ -144,7 +159,7 @@ def build_test_plan(
     ready_timeout_seconds: float = 300,
     scenario_id: str | None = None,
     candidate_id: int | None = None,
-    run_id: str | None = None,
+    samples: int | None = None,
     execution_id: str | None = None,
 ) -> TestPlanMetadata:
     compose_file = Path(compose_file).resolve()
@@ -162,37 +177,33 @@ def build_test_plan(
         results_dir = Path(results_dir)
     if not results_dir.is_absolute():
         results_dir = root / results_dir
-    if run_id is not None:
-        if scenario_id is None or candidate_id is None:
-            raise ValueError("An explicit run ID needs both a scenario and candidate")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
-            raise ValueError(
-                "Run ID must use letters, numbers, underscores, or hyphens"
-            )
-
     candidates = {candidate.id: candidate for candidate in experiment.candidates}
     scenarios = {scenario.id: scenario for scenario in experiment.scenarios}
     if scenario_id is not None and scenario_id not in scenarios:
         raise ValueError(f"Unknown scenario: {scenario_id}")
     if candidate_id is not None and candidate_id not in candidates:
         raise ValueError(f"Unknown candidate ID: {candidate_id}")
+    if candidate_id is not None and scenario_id is None:
+        raise ValueError("A candidate requires a scenario")
+    if candidate_id is not None and samples is not None:
+        raise ValueError("Sample override is not available for an ad-hoc candidate")
+    if samples is not None and (type(samples) is not int or samples < 1):
+        raise ValueError("Sample count must be a positive integer")
 
     runs = []
     for scenario in experiment.scenarios:
         if scenario_id is not None and scenario.id != scenario_id:
             continue
+        if scenario_id is None and scenario.draft:
+            continue
         fixtures, builds = _fixtures(scenario, experiment, workdir)
-        next_number = 1
-        for entry in scenario.run_order:
-            if type(entry) is not int or entry not in candidates:
-                raise ValueError(f"Invalid candidate ID in {scenario.id}: {entry!r}")
-            if candidate_id is not None and entry != candidate_id:
-                continue
-            if run_id is not None:
-                selected_id = run_id
-            else:
-                selected_id = f"run{next_number:03d}"
-                next_number += 1
+        order = (
+            (candidate_id,)
+            if candidate_id is not None
+            else resolve_run_order(scenario, tuple(candidates), samples)
+        )
+        for next_number, entry in enumerate(order, start=1):
+            selected_id = f"run{next_number:03d}"
             result_dir = (
                 results_dir / scenario.id / candidates[entry].name / selected_id
             )
@@ -210,8 +221,6 @@ def build_test_plan(
                     result_dir=result_dir,
                 )
             )
-            if run_id is not None:
-                break
     if not runs:
         raise ValueError("The selected test plan has no runs")
     return TestPlanMetadata(

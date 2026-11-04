@@ -103,6 +103,68 @@ def write_api_samples(run_dir):
 
 
 class TestReportDiscovery(unittest.TestCase):
+    def test_squeeze_generates_reports_after_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "_juice"
+            calls = []
+
+            def fake_execute(plan, **kwargs):
+                calls.append("execute")
+                run = plan.runs[0]
+                run.result_dir.mkdir(parents=True)
+                (run.result_dir / "run_metadata.json").write_text("{}")
+                return (
+                    SimpleNamespace(
+                        scenario_id=run.scenario_id,
+                        run_id=run.run_id,
+                        candidate_name=run.candidate.name,
+                        completed_requests=10,
+                        expected_requests=10,
+                        failures=0,
+                        p95_response_ms=15,
+                        result_dir=run.result_dir,
+                        timed_out=False,
+                    ),
+                )
+
+            def fake_render(name):
+                def render(execution_dir, *args):
+                    calls.append(name)
+                    return execution_dir / name
+
+                return render
+
+            with (
+                patch("pulp_juicer.cli.execute_test_plan", side_effect=fake_execute),
+                patch("pulp_juicer.cli.render_report", side_effect=fake_render("report.html")),
+                patch(
+                    "pulp_juicer.cli.render_trial_report",
+                    side_effect=fake_render("trials.html"),
+                ),
+                patch(
+                    "pulp_juicer.cli.render_interactive_report",
+                    side_effect=fake_render("interactive.html"),
+                ),
+            ):
+                response = CliRunner().invoke(
+                    cli,
+                    [
+                        "squeeze",
+                        "bucket-repository",
+                        "--workdir",
+                        str(workdir),
+                        "pull-through-1k-impulse",
+                        "normal",
+                        "--run",
+                    ],
+                )
+            self.assertEqual(response.exit_code, 0, response.output)
+            self.assertEqual(
+                calls, ["execute", "report.html", "trials.html", "interactive.html"]
+            )
+            self.assertIn("New Reports:", response.output)
+            self.assertIn("interactive.html", response.output)
+
     def test_interactive_report_groups_runs_and_embeds_series_safely(self):
         with tempfile.TemporaryDirectory() as tmp:
             execution = Path(tmp) / "example__001"
@@ -495,6 +557,7 @@ class TestReportDiscovery(unittest.TestCase):
                     "Available execution IDs:",
                     "  bucket-repository__001",
                     "  bucket-repository__002",
+                    "",
                     "Use pulp-juicer report EXECUTION_ID to generate its reports.",
                 ],
             )

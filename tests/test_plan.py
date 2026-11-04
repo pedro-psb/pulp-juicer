@@ -11,8 +11,9 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from experiments.bucket_repository.experiment import EXPERIMENT
+from pulp_juicer import sample_sequence
 from pulp_juicer.cli import cli
-from pulp_juicer.plan import build_test_plan
+from pulp_juicer.plan import build_test_plan, resolve_run_order
 from pulp_juicer.plan_file import load_plan_file, write_plan_file
 from pulp_juicer.types import LoadStep, StepFunctionLoad, UnitaryImpulseLoad
 
@@ -20,10 +21,61 @@ COMPOSE = (
     Path(__file__).resolve().parents[1]
     / "src/experiments/bucket_repository/compose.yaml"
 )
-TOTAL_RUNS = sum(len(scenario.run_order) for scenario in EXPERIMENT.scenarios)
+TOTAL_RUNS = sum(
+    len(
+        resolve_run_order(
+            scenario, tuple(candidate.id for candidate in EXPERIMENT.candidates)
+        )
+    )
+    for scenario in EXPERIMENT.scenarios
+    if not scenario.draft
+)
+BURST_ORDER = next(s.run_order for s in EXPERIMENT.scenarios if s.id == "burst")
+BURST_SAMPLES = len(BURST_ORDER) // len(EXPERIMENT.candidates)
 
 
 class TestPlan(unittest.TestCase):
+    def test_sample_sequence_balances_candidates_and_reverses_rounds(self):
+        self.assertEqual(sample_sequence(3, (1, 2)), (1, 2, 2, 1, 1, 2))
+        self.assertEqual(sample_sequence(2, (1, 2, 3)), (1, 2, 3, 3, 2, 1))
+        self.assertEqual(
+            BURST_ORDER,
+            sample_sequence(n=BURST_SAMPLES, candidates=(1, 2)),
+        )
+        with self.assertRaisesRegex(ValueError, "run_order must be a nonempty tuple"):
+            replace(
+                next(s for s in EXPERIMENT.scenarios if s.id == "burst"),
+                run_order=sample_sequence,
+            )
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            sample_sequence(0, (1, 2))
+        with self.assertRaisesRegex(ValueError, "unique IDs"):
+            sample_sequence(2, (1, 1))
+
+    def test_draft_and_sample_override(self):
+        self.assertNotIn(
+            "calibrate", {scenario.id for scenario in EXPERIMENT.scenarios}
+        )
+        self.assertNotIn(
+            "short-impulse", {scenario.id for scenario in EXPERIMENT.scenarios}
+        )
+        self.assertNotIn(
+            "tmp",
+            {run.scenario_id for run in build_test_plan(EXPERIMENT, COMPOSE).runs},
+        )
+        draft = build_test_plan(EXPERIMENT, COMPOSE, scenario_id="tmp")
+        self.assertEqual([run.candidate.id for run in draft.runs], [1, 2])
+        sampled = build_test_plan(EXPERIMENT, COMPOSE, scenario_id="burst", samples=3)
+        self.assertEqual([run.candidate.id for run in sampled.runs], [1, 2, 2, 1, 1, 2])
+        explicit = next(
+            scenario for scenario in EXPERIMENT.scenarios if scenario.id == "tmp"
+        )
+        self.assertEqual(resolve_run_order(explicit, (1, 2)), (1, 2))
+        self.assertEqual(resolve_run_order(explicit, (1, 2), samples=2), (1, 2, 2, 1))
+        entire = build_test_plan(EXPERIMENT, COMPOSE, samples=3)
+        self.assertEqual(len(entire.runs), 24)
+        self.assertNotIn("tmp", {run.scenario_id for run in entire.runs})
+
     def test_load_profiles_derive_locust_settings(self):
         impulse = UnitaryImpulseLoad(request_count=50)
         self.assertEqual((impulse.users, impulse.spawn_rate_per_second), (50, 50))
@@ -44,7 +96,7 @@ class TestPlan(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for scenario_id, profile_type in (
-                ("calibrate", UnitaryImpulseLoad),
+                ("pull-through-1k-impulse", UnitaryImpulseLoad),
                 ("burst", StepFunctionLoad),
             ):
                 with self.subTest(scenario=scenario_id):
@@ -86,9 +138,12 @@ class TestPlan(unittest.TestCase):
             self.assertEqual(len(plan.runs), TOTAL_RUNS)
             self.assertEqual(
                 [run.candidate.id for run in plan.runs if run.scenario_id == "burst"],
-                [1, 2, 2, 1],
+                list(BURST_ORDER),
             )
-            self.assertEqual([run.candidate.id for run in plan.runs[:3]], [1, 2, 2])
+            self.assertEqual(
+                [run.candidate.id for run in plan.runs[:3]],
+                list(EXPERIMENT.scenarios[0].run_order[:3]),
+            )
             self.assertEqual(len({run.result_dir for run in plan.runs}), len(plan.runs))
             fixture = plan.runs[0].fixtures["maven"]
             self.assertTrue(fixture.output_dir.is_absolute())
@@ -117,7 +172,6 @@ class TestPlan(unittest.TestCase):
                 "results_dir": root / "results",
                 "scenario_id": "burst",
                 "candidate_id": 1,
-                "run_id": "trial001",
             }
             plan = build_test_plan(EXPERIMENT, COMPOSE, **options)
             self.assertEqual(
@@ -125,7 +179,7 @@ class TestPlan(unittest.TestCase):
                     (run.scenario_id, run.candidate.name, run.run_id)
                     for run in plan.runs
                 ],
-                [("burst", "normal", "trial001")],
+                [("burst", "normal", "run001")],
             )
             plan.runs[0].result_dir.mkdir(parents=True)
             repeated = build_test_plan(EXPERIMENT, COMPOSE, **options)
@@ -155,7 +209,7 @@ class TestCli(unittest.TestCase):
             results = workdir / "exeuctions"
             current = (
                 results
-                / "bucket-repository__burst__run001__001"
+                / "bucket-repository__burst__normal__001"
                 / "burst"
                 / "normal"
                 / "run001"
@@ -358,7 +412,7 @@ class TestCli(unittest.TestCase):
         self.assertNotIn("run001", run_without_experiment.output)
         self.assertIn("Available experiments:\n", run_without_experiment.output)
         self.assertIn(
-            "Use pulp-juicer squeeze EXPERIMENT to list available runs.",
+            "Use pulp-juicer squeeze EXPERIMENT to list its scenarios.",
             run_without_experiment.output,
         )
         self.assertNotIn("Usage:", run_without_experiment.output)
@@ -371,7 +425,7 @@ class TestCli(unittest.TestCase):
             listed.output,
         )
         self.assertIn(
-            "  calibrate: Analyse system response to a big impulse load",
+            "  pull-through-1k-impulse: Request 1,000 unique Maven artifacts in one impulse.",
             listed.output,
         )
         self.assertNotIn("response time and request completion", listed.output)
@@ -405,7 +459,8 @@ class TestCli(unittest.TestCase):
         self.assertIn("response time and request completion", shown.output)
         self.assertIn("Required sources: pulpcore, pulp_maven", shown.output)
         self.assertIn(
-            "burst: Thirty concurrent users request 650 unique Maven artifacts. (4 runs, 30 users)",
+            f"burst: Thirty concurrent users request 650 unique Maven artifacts. "
+            f"({len(BURST_ORDER)} runs, 30 users)",
             shown.output,
         )
         self.assertIn(
@@ -422,7 +477,7 @@ class TestCli(unittest.TestCase):
         ]
         self.assertEqual(run_rows[0], ["SCENARIO", "RUN_ID", "CANDIDATE"])
         self.assertEqual(len(run_rows[1:]), TOTAL_RUNS)
-        self.assertEqual(run_rows[1], ["calibrate", "run001", "normal"])
+        self.assertEqual(run_rows[1], ["pull-through-1k-impulse", "run001", "normal"])
         expected_rows = [
             [run.scenario_id, run.run_id, run.candidate.name]
             for run in build_test_plan(EXPERIMENT, COMPOSE).runs
@@ -436,29 +491,65 @@ class TestCli(unittest.TestCase):
             command = ["squeeze", "bucket-repository", "--workdir", str(workdir)]
             listed = runner.invoke(cli, command)
             self.assertEqual(listed.exit_code, 0, listed.output)
-            self.assertIn("Available runs for bucket-repository", listed.output)
+            self.assertIn("Scenarios:", listed.output)
+            self.assertIn("Candidates:", listed.output)
+            self.assertIn(
+                f"  burst: (samples/candidate={BURST_SAMPLES})\n"
+                "    Thirty concurrent users request 650 unique Maven artifacts.",
+                listed.output,
+            )
+            self.assertIn(
+                "  tmp: (samples/candidate=1) [draft]\n    Temporary experiments.",
+                listed.output,
+            )
+            self.assertIn("\n\nUse pulp-juicer squeeze", listed.output)
             self.assertFalse(workdir.exists())
+
+            scenario_listing = runner.invoke(cli, [*command, "burst"])
+            self.assertEqual(scenario_listing.exit_code, 0, scenario_listing.output)
+            self.assertIn(
+                f"burst: (samples/candidate={BURST_SAMPLES})\n",
+                scenario_listing.output,
+            )
+            self.assertEqual(
+                scenario_listing.output.count("Thirty concurrent users request"), 1
+            )
+            self.assertNotIn("tmp: (samples/candidate=1)", scenario_listing.output)
+            self.assertIn("\n\nUse pulp-juicer squeeze", scenario_listing.output)
+
+            candidate_listing = runner.invoke(cli, [*command, "burst", "staging"])
+            self.assertEqual(candidate_listing.exit_code, 0, candidate_listing.output)
+            self.assertIn("Sources:", candidate_listing.output)
+            self.assertIn("Settings:", candidate_listing.output)
+            self.assertIn(
+                "STAGING_AUTOCOMMIT_DELAY_SECONDS: 10", candidate_listing.output
+            )
+            self.assertIn("\n\nUse pulp-juicer squeeze", candidate_listing.output)
+            self.assertFalse(workdir.exists())
+            numeric_candidate = runner.invoke(cli, [*command, "burst", "2"])
+            self.assertIn("staging —", numeric_candidate.output)
 
             recorded = []
             with patch(
                 "pulp_juicer.cli.execute_test_plan",
                 side_effect=lambda plan, **kwargs: recorded.append(plan) or (),
             ):
-                selected = runner.invoke(cli, [*command, "--scenario", "burst"])
+                selected = runner.invoke(cli, [*command, "burst", "--run"])
             self.assertEqual(selected.exit_code, 0, selected.output)
-            self.assertEqual(len(recorded[0].runs), 4)
+            self.assertEqual(
+                len(recorded[0].runs),
+                len(BURST_ORDER),
+            )
             self.assertEqual(recorded[0].execution_id, "bucket-repository__burst__001")
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
             self.assertTrue(recorded[0].results_dir.is_dir())
 
             with patch("pulp_juicer.cli.execute_test_plan", return_value=()):
-                saved = runner.invoke(
-                    cli, [*command, "--scenario", "burst", "--save-plan"]
-                )
+                saved = runner.invoke(cli, [*command, "burst", "--run", "--save-plan"])
             self.assertEqual(saved.exit_code, 0, saved.output)
             plan_file = workdir / "plan-bucket-repository__burst__002.json"
             self.assertIn(f"Plan: {plan_file}", saved.output)
-            self.assertEqual(len(load_plan_file(plan_file).runs), 4)
+            self.assertEqual(len(load_plan_file(plan_file).runs), len(BURST_ORDER))
             data = json.loads(plan_file.read_text())
             self.assertNotIn("password", data["runtime"]["pulp_connection"])
             self.assertEqual(data["execution_id"], "bucket-repository__burst__002")
@@ -488,9 +579,10 @@ class TestCli(unittest.TestCase):
 
             with patch("pulp_juicer.cli.execute_test_plan", side_effect=fake_execute):
                 for scope in (
-                    ["--all"],
-                    ["--scenario", "burst"],
-                    ["--scenario", "burst", "--run-id", "run002"],
+                    ["--run"],
+                    ["burst", "--run"],
+                    ["burst", "staging", "--run"],
+                    ["burst", "--run", "-s", "3"],
                 ):
                     response = CliRunner().invoke(cli, [*command, *scope])
                     self.assertEqual(response.exit_code, 0, response.output)
@@ -500,11 +592,23 @@ class TestCli(unittest.TestCase):
                 [
                     "bucket-repository__001",
                     "bucket-repository__burst__002",
-                    "bucket-repository__burst__run002__003",
+                    "bucket-repository__burst__staging__003",
+                    "bucket-repository__burst__004",
                 ],
             )
-            self.assertEqual([len(plan.runs) for plan in recorded], [TOTAL_RUNS, 4, 1])
-            self.assertEqual(recorded[-1].runs[0].run_id, "run002")
+            self.assertEqual(
+                [len(plan.runs) for plan in recorded],
+                [
+                    TOTAL_RUNS,
+                    len(BURST_ORDER),
+                    1,
+                    6,
+                ],
+            )
+            self.assertEqual(recorded[2].runs[0].run_id, "run001")
+            self.assertEqual(
+                [run.candidate.id for run in recorded[3].runs], [1, 2, 2, 1, 1, 2]
+            )
             for plan in recorded:
                 self.assertEqual(
                     plan.results_dir, workdir / "exeuctions" / plan.execution_id
@@ -520,10 +624,9 @@ class TestCli(unittest.TestCase):
                 "bucket-repository",
                 "--workdir",
                 str(workdir),
-                "--scenario",
                 "burst",
-                "--run-id",
-                "run001",
+                "normal",
+                "--run",
             ]
             with patch("pulp_juicer.cli.execute_test_plan", return_value=()) as execute:
                 first = CliRunner().invoke(cli, command)
@@ -538,7 +641,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(repeated.exit_code, 0, repeated.output)
             self.assertEqual(
                 execute.call_args.args[0].execution_id,
-                "bucket-repository__burst__run001__002",
+                "bucket-repository__burst__normal__002",
             )
             self.assertTrue((first_result / "keep.txt").is_file())
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
@@ -552,7 +655,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(after_clean.exit_code, 0, after_clean.output)
             self.assertEqual(
                 execute.call_args.args[0].execution_id,
-                "bucket-repository__burst__run001__003",
+                "bucket-repository__burst__normal__003",
             )
 
     def test_force_replaces_latest_matching_execution_only(self):
@@ -563,20 +666,19 @@ class TestCli(unittest.TestCase):
                 "bucket-repository",
                 "--workdir",
                 str(workdir),
-                "--scenario",
                 "burst",
-                "--run-id",
-                "run001",
+                "normal",
+                "--run",
             ]
             with patch("pulp_juicer.cli.execute_test_plan", return_value=()):
                 for _ in range(2):
                     created = CliRunner().invoke(cli, command)
                     self.assertEqual(created.exit_code, 0, created.output)
             first_root = (
-                workdir / "exeuctions" / "bucket-repository__burst__run001__001"
+                workdir / "exeuctions" / "bucket-repository__burst__normal__001"
             )
             (first_root / "keep.txt").write_text("keep")
-            latest_id = "bucket-repository__burst__run001__002"
+            latest_id = "bucket-repository__burst__normal__002"
             result_root = workdir / "exeuctions" / latest_id
             (result_root / "old.txt").write_text("old")
             other_result = (
@@ -608,10 +710,9 @@ class TestCli(unittest.TestCase):
                 "bucket-repository",
                 "--workdir",
                 str(workdir),
-                "--scenario",
                 "burst",
-                "--run-id",
-                "run001",
+                "normal",
+                "--run",
             ]
             with patch("pulp_juicer.cli.execute_test_plan", return_value=()):
                 saved = CliRunner().invoke(cli, [*command, "--save-plan"])
@@ -620,7 +721,7 @@ class TestCli(unittest.TestCase):
                 self.assertEqual(replaced.exit_code, 0, replaced.output)
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
             self.assertIn(
-                "Execution: bucket-repository__burst__run001__001", replaced.output
+                "Execution: bucket-repository__burst__normal__001", replaced.output
             )
 
     def test_failed_squeeze_can_be_replaced_without_a_saved_plan(self):
@@ -631,10 +732,9 @@ class TestCli(unittest.TestCase):
                 "bucket-repository",
                 "--workdir",
                 str(workdir),
-                "--scenario",
                 "burst",
-                "--run-id",
-                "run001",
+                "normal",
+                "--run",
             ]
 
             def fail_with_compose_log(plan, **kwargs):
@@ -648,7 +748,7 @@ class TestCli(unittest.TestCase):
             ):
                 failed = CliRunner().invoke(cli, command)
             self.assertNotEqual(failed.exit_code, 0)
-            execution_id = "bucket-repository__burst__run001__001"
+            execution_id = "bucket-repository__burst__normal__001"
             self.assertTrue((workdir / "exeuctions" / execution_id).is_dir())
             compose_log = (
                 workdir
@@ -680,10 +780,9 @@ class TestCli(unittest.TestCase):
                 "bucket-repository",
                 "--workdir",
                 str(workdir),
-                "--scenario",
                 "burst",
-                "--run-id",
-                "run001",
+                "normal",
+                "--run",
             ]
 
             def failed_requests(plan, **kwargs):
@@ -711,7 +810,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertIn("10/10 requests, 2 failures", response.output)
             self.assertIn(
-                f"Compose log: {workdir / 'exeuctions' / 'bucket-repository__burst__run001__001' / 'burst' / 'normal' / 'run001' / 'compose.log'}",
+                f"Compose log: {workdir / 'exeuctions' / 'bucket-repository__burst__normal__001' / 'burst' / 'normal' / 'run001' / 'compose.log'}",
                 response.output,
             )
             self.assertIn("Results:", response.output)
@@ -746,10 +845,9 @@ class TestCli(unittest.TestCase):
                         "bucket-repository",
                         "--workdir",
                         str(workdir),
-                        "--scenario",
                         "burst",
-                        "--run-id",
-                        "run001",
+                        "normal",
+                        "--run",
                     ],
                 )
 
@@ -757,7 +855,7 @@ class TestCli(unittest.TestCase):
             compose_log = (
                 workdir
                 / "exeuctions"
-                / "bucket-repository__burst__run001__001"
+                / "bucket-repository__burst__normal__001"
                 / "burst"
                 / "normal"
                 / "run001"
@@ -774,10 +872,9 @@ class TestCli(unittest.TestCase):
                 "bucket-repository",
                 "--workdir",
                 str(workdir),
-                "--scenario",
                 "burst",
-                "--run-id",
-                "run001",
+                "normal",
+                "--run",
             ]
 
             def fake_execute(plan, **kwargs):
@@ -793,7 +890,7 @@ class TestCli(unittest.TestCase):
             log_path = (
                 workdir
                 / "exeuctions"
-                / "bucket-repository__burst__run001__001"
+                / "bucket-repository__burst__normal__001"
                 / "execution.log"
             )
             self.assertIn(f"Log: {log_path}", response.output)
@@ -815,8 +912,10 @@ class TestCli(unittest.TestCase):
             ]
             for scope in (
                 ["--run-id", "run001"],
-                ["--all", "--scenario", "burst"],
-                ["--scenario", "burst", "--run-id", "missing"],
+                ["burst", "normal", "-s", "3", "--run"],
+                ["burst", "-s", "0", "--run"],
+                ["burst", "-s", "3"],
+                ["burst", "missing"],
             ):
                 response = CliRunner().invoke(cli, [*command, *scope])
                 self.assertNotEqual(response.exit_code, 0)
@@ -831,19 +930,18 @@ class TestCli(unittest.TestCase):
                 "--workdir",
                 str(workdir),
                 "--post-debug",
+                "--run",
             ]
-            for scope in ([], ["--all"], ["--scenario", "burst"]):
+            for scope in ([], ["burst"]):
                 response = CliRunner().invoke(cli, [*command, *scope])
                 self.assertNotEqual(response.exit_code, 0)
-                self.assertIn(
-                    "--post-debug requires --scenario and --run-id", response.output
-                )
+                self.assertIn("--post-debug requires a candidate", response.output)
             self.assertFalse(workdir.exists())
 
             with patch("pulp_juicer.cli.execute_test_plan", return_value=()) as execute:
                 response = CliRunner().invoke(
                     cli,
-                    [*command, "--scenario", "burst", "--run-id", "run001"],
+                    [*command, "burst", "normal"],
                     env={"COMPOSE": "docker compose"},
                 )
             self.assertEqual(response.exit_code, 0, response.output)
@@ -872,7 +970,7 @@ class TestCli(unittest.TestCase):
             ):
                 failed = CliRunner().invoke(
                     cli,
-                    [*command, "--scenario", "burst", "--run-id", "run001"],
+                    [*command, "burst", "normal"],
                     env={"COMPOSE": "docker compose"},
                 )
             self.assertNotEqual(failed.exit_code, 0)

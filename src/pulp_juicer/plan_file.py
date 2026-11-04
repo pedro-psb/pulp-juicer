@@ -160,7 +160,9 @@ def load_plan_file(
         raise ValueError("A run ID requires a scenario")
     data = json.loads(Path(path).read_text())
     if data.get("version") != VERSION or data.get("kind") != "plan":
-        raise ValueError(f"Unsupported plan file: {path}. Run squeeze -f to replace it")
+        raise ValueError(
+            f"Unsupported plan file: {path}. Regenerate it with squeeze --run -f"
+        )
     experiment_id = data["experiment"]
     registry = experiments()
     if experiment_id not in registry:

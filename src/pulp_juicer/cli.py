@@ -7,7 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from dataclasses import replace
+from collections import Counter
 from pathlib import Path
 
 import click
@@ -21,7 +21,7 @@ from .execution import execute_test_plan
 from .execution_ids import EXECUTIONS_DIRNAME, latest_execution_id, next_execution_id
 from .execution_log import ExecutionLog
 from .interactive_report import render_interactive_report
-from .plan import build_test_plan, execution_scope, resolve_workdir
+from .plan import build_test_plan, execution_scope, resolve_run_order, resolve_workdir
 from .plan_file import write_plan_file
 from .report import render_report
 from .sources import public_source
@@ -82,6 +82,57 @@ def _list_experiments(*, include_scenarios=True):
                 _print_styled("  ", (scenario.id, "green"), ": ", scenario.description)
 
 
+def _list_candidates(experiment):
+    _print_styled(("Candidates:", "bold magenta"))
+    for candidate in experiment.candidates:
+        _print_styled(
+            "  ",
+            (candidate.id, "yellow"),
+            ": ",
+            (candidate.name, "cyan"),
+            " — ",
+            candidate.description,
+        )
+
+
+def _list_scenarios(experiment, selected=None):
+    _print_styled(("Scenarios:", "bold magenta"))
+    for scenario in experiment.scenarios:
+        if selected is not None and scenario.id != selected:
+            continue
+        order = resolve_run_order(scenario, tuple(c.id for c in experiment.candidates))
+        counts = Counter(order)
+        samples = set(counts.values())
+        if len(counts) == len(experiment.candidates) and len(samples) == 1:
+            sample_count = str(next(iter(samples)))
+        else:
+            sample_count = "varies"
+        _print_styled(
+            "  ",
+            (scenario.id, "green"),
+            ":",
+            (f" (samples/candidate={sample_count})", "dim"),
+            (" [draft]", "dim") if scenario.draft else "",
+        )
+        _print_styled("    ", scenario.description)
+
+
+def _show_candidate(experiment, candidate):
+    _print_styled(("Candidate:", "bold magenta"))
+    _print_styled("  ", (candidate.name, "cyan"), " — ", candidate.description)
+    _print_styled(("Sources:", "bold magenta"))
+    for name in experiment.required_sources:
+        _print_styled(
+            "  ", (name, "green"), ": ", public_source(candidate.sources[name])
+        )
+    _print_styled(("Settings:", "bold magenta"))
+    if candidate.pulp_settings:
+        for name, value in candidate.pulp_settings.items():
+            _print_styled("  ", (name, "green"), ": ", value)
+    else:
+        click.echo("  Default Pulp settings")
+
+
 def _print_post_debug_commands(plan, *, maybe_running=False):
     project = ComposeRuntime(plan).project
     compose = list(plan.compose_command)
@@ -122,7 +173,7 @@ def show_experiment(experiment_id):
     if experiment_id is None:
         _print_styled(("Available experiments:", "bold magenta"))
         _list_experiments(include_scenarios=False)
-        click.echo("Use pulp-juicer show EXPERIMENT for details.")
+        click.echo("\nUse pulp-juicer show EXPERIMENT for details.")
         return
     registry = experiments()
     if experiment_id not in registry:
@@ -134,13 +185,18 @@ def show_experiment(experiment_id):
     )
     _print_styled(("Scenarios:", "bold magenta"))
     for scenario in experiment.scenarios:
-        count = len(scenario.run_order)
+        count = len(
+            resolve_run_order(scenario, tuple(c.id for c in experiment.candidates))
+        )
         _print_styled(
             "  ",
             (scenario.id, "green"),
             ": ",
             scenario.description,
-            (f" ({count} runs, {scenario.load.users} users)", "dim"),
+            (
+                f" ({count} runs, {scenario.load.users} users{' — draft' if scenario.draft else ''})",
+                "dim",
+            ),
         )
     _print_styled(("Candidates:", "bold magenta"))
     for candidate in experiment.candidates:
@@ -204,7 +260,7 @@ def report_results(execution_id, results_dir, quarto_command, zip_reports):
         _print_styled(("Available execution IDs:", "bold magenta"))
         for name in executions:
             _print_styled("  ", (name, "cyan"))
-        click.echo("Use pulp-juicer report EXECUTION_ID to generate its reports.")
+        click.echo("\nUse pulp-juicer report EXECUTION_ID to generate its reports.")
         return
 
     new_reports = []
@@ -539,17 +595,18 @@ def clean(targets, workdir, docker_command):
 
 @cli.command("squeeze")
 @click.argument("experiment_id", required=False)
+@click.argument("scenario_id", required=False)
+@click.argument("candidate_name", required=False)
 @click.option(
     "--workdir",
     type=click.Path(path_type=Path),
     default=Path("_juice"),
     show_default=True,
 )
+@click.option("--run", "execute", is_flag=True, help="Execute the selected scope.")
 @click.option(
-    "--all", "run_all", is_flag=True, help="Run every scenario and unit in the plan."
+    "-s", "--samples", type=click.IntRange(min=1), help="Samples per candidate."
 )
-@click.option("--scenario", "scenario_id", help="Run one scenario from the plan.")
-@click.option("--run-id", help="Run one unit within the selected scenario.")
 @click.option(
     "-f", "--force", is_flag=True, help="Replace the latest execution for this scope."
 )
@@ -559,41 +616,73 @@ def clean(targets, workdir, docker_command):
 @click.option(
     "--post-debug",
     is_flag=True,
-    help="Leave services running after one --run-id measurement.",
+    help="Leave services running after an ad-hoc candidate measurement.",
 )
 def squeeze(
-    experiment_id, workdir, run_all, scenario_id, run_id, force, save_plan, post_debug
+    experiment_id,
+    scenario_id,
+    candidate_name,
+    workdir,
+    execute,
+    samples,
+    force,
+    save_plan,
+    post_debug,
 ):
-    """List available runs, or execute an experiment, scenario, or run."""
+    """Inspect or run an experiment, scenario, or ad-hoc candidate."""
     if experiment_id is None:
         _print_styled(("Available experiments:", "bold magenta"))
         _list_experiments(include_scenarios=False)
-        click.echo("Use pulp-juicer squeeze EXPERIMENT to list available runs.")
+        click.echo("\nUse pulp-juicer squeeze EXPERIMENT to list its scenarios.")
         click.get_current_context().exit(2)
     registry = experiments()
     if experiment_id not in registry:
         raise click.ClickException(f"Unknown experiment: {experiment_id}")
-    if run_all and (scenario_id is not None or run_id is not None):
-        raise click.ClickException(
-            "--all cannot be combined with --scenario or --run-id"
-        )
-    if run_id is not None and scenario_id is None:
-        raise click.UsageError("--run-id requires --scenario")
-    if post_debug and run_id is None:
-        raise click.UsageError("--post-debug requires --scenario and --run-id")
     experiment, compose_file = registry[experiment_id]
-    if not run_all and scenario_id is None:
-        _print_styled(
-            ("Available runs for ", "bold magenta"),
-            (experiment_id, "bold cyan"),
-            (":", "bold magenta"),
-        )
-        _list_runs(build_test_plan(experiment, compose_file).runs)
-        click.echo(
-            "Use --all, --scenario SCENARIO, or --scenario SCENARIO --run-id RUN_ID to squeeze."
-        )
+    scenarios = {scenario.id: scenario for scenario in experiment.scenarios}
+    if scenario_id is not None and scenario_id not in scenarios:
+        raise click.ClickException(f"Unknown scenario: {scenario_id}")
+    candidates = {candidate.name: candidate for candidate in experiment.candidates}
+    candidates.update(
+        {str(candidate.id): candidate for candidate in experiment.candidates}
+    )
+    if candidate_name is not None and candidate_name not in candidates:
+        raise click.ClickException(f"Unknown candidate: {candidate_name}")
+    if candidate_name is not None and scenario_id is None:
+        raise click.UsageError("A candidate requires a scenario")
+    if samples is not None and candidate_name is not None:
+        raise click.UsageError("-s is not available for an ad-hoc candidate")
+    if samples is not None and not execute:
+        raise click.UsageError("-s requires --run")
+    if (force or save_plan or post_debug) and not execute:
+        raise click.UsageError("-f, --save-plan, and --post-debug require --run")
+    if post_debug and candidate_name is None:
+        raise click.UsageError("--post-debug requires a candidate")
+    if not execute:
+        _print_styled((experiment.id, "bold cyan"), ": ", experiment.short_description)
+        if scenario_id is not None and candidate_name is not None:
+            _print_styled(
+                (scenario_id, "bold green"), ": ", scenarios[scenario_id].description
+            )
+        if candidate_name is None:
+            _list_candidates(experiment)
+            _list_scenarios(experiment, selected=scenario_id)
+            instruction = (
+                f"pulp-juicer squeeze {experiment_id}"
+                + (f" {scenario_id}" if scenario_id else "")
+                + " --run [-s N]"
+            )
+        else:
+            _show_candidate(experiment, candidates[candidate_name])
+            instruction = f"pulp-juicer squeeze {experiment_id} {scenario_id} {candidate_name} --run"
+        click.echo(f"\nUse {instruction} to execute.")
         return
-    scope = execution_scope(experiment_id, scenario_id, run_id)
+    selected_candidate = candidates[candidate_name] if candidate_name else None
+    scope = execution_scope(
+        experiment_id,
+        scenario_id,
+        selected_candidate.name if selected_candidate else None,
+    )
     root = resolve_workdir(compose_file, workdir)
     execution_log = None
     plan = None
@@ -613,16 +702,13 @@ def squeeze(
             workdir=workdir,
             execution_id=selected_id,
             scenario_id=scenario_id,
+            candidate_id=selected_candidate.id if selected_candidate else None,
+            samples=samples,
             pulp_connection=PulpConnection(
                 password=os.environ.get("PULP_PASSWORD", "password")
             ),
             compose_command=command,
         )
-        if run_id is not None:
-            selected_runs = tuple(run for run in plan.runs if run.run_id == run_id)
-            if not selected_runs:
-                raise ValueError(f"Unknown run ID in {scenario_id}: {run_id}")
-            plan = replace(plan, runs=selected_runs)
         execution_log.logger.info("Plan preparation finished: %d runs", len(plan.runs))
         if force and plan.results_dir.exists():
             shutil.rmtree(plan.results_dir)
@@ -693,6 +779,15 @@ def squeeze(
         click.echo(f"\nResults: {plan.results_dir}")
     if post_debug:
         _print_post_debug_commands(plan)
+    if any((run.result_dir / "run_metadata.json").is_file() for run in plan.runs):
+        click.echo()
+        click.get_current_context().invoke(
+            report_results,
+            execution_id=selected_id,
+            results_dir=plan.results_dir.parent,
+            quarto_command=os.environ.get("QUARTO", "quarto"),
+            zip_reports=False,
+        )
     if incomplete:
         raise click.ClickException("One or more runs were incomplete")
 

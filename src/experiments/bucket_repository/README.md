@@ -5,7 +5,7 @@ Candidate IDs are positive integers.
 Each scenario uses its own `request_count`, which may be less than the fixture capacity.
 Each candidate has a short description shown by `pulp-juicer show bucket-repository`.
 `UnitaryImpulseLoad(request_count=N)` starts N users, each making one request. `StepFunctionLoad` changes the target user count at each `LoadStep(at_seconds, users)` and derives a spawn rate for each change. Burst and temporary scenarios currently have one step, preserving their user targets and request counts. Duration, waits, and timeouts use profile defaults.
-The burst scenario runs normal and staging twice. Pulp volumes are reset before every run; generated fixture data remains on disk.
+The burst scenario samples normal and staging according to its configured sequence. `pull-through-1k-impulse` combines the former calibrate and short-impulse scenarios; use `-s N` to choose N samples per candidate. `pull-through-1k-impulse-repeated-requests` sends ten copies of the same ordered list of 100 Maven artifacts (1,000 requests total). The request list is repeated; the impulse starts the users together, so completion order is not guaranteed. `tmp` is a draft and is excluded from whole-experiment executions. Pulp volumes are reset before every measurement; generated fixture data remains on disk.
 The `upload-impulse` scenario reuses those JAR files for 100 concurrent multipart POSTs to Maven's synchronous upload endpoint. Each request includes a unique `relative_path`. Staging uploads include the repository so Pulp stages each content unit; normal uploads collect the returned content HREFs and end with one repository modify request that adds them all. HTTP Basic credentials are supplied only at execution time.
 
 ## Candidate sources
@@ -50,22 +50,24 @@ The experiment modules do not import Locust.
 
 ## Test plan and CLI
 
-`build_test_plan` expands this experiment's `run_order` into ordered `RunMetadata` records. Each record identifies a scenario, candidate, and run ID and carries fixture metadata and load settings. Planning does not build fixtures or start services.
-`squeeze` selects an execution: the whole experiment, one scenario, or one run. It builds the selected plan in memory; `--save-plan` also writes JSON. The Python wrapper builds fixtures, starts Pulp, and invokes candidate setup before Locust begins recording; it destroys the services after Locust finishes and closes its measurements. The driver returns `RunResultMetadata` with request counts, failures, latency, and artifact paths.
+`build_test_plan` expands each scenario's `run_order` tuple into ordered `RunMetadata` records. Scenario declarations can call `sample_sequence(n, candidates)` to create that tuple; the helper gives every candidate N samples in alternating forward and reverse rounds. Each record identifies a scenario, candidate, and run ID and carries fixture metadata and load settings. Planning does not build fixtures or start services.
+`squeeze` lists the selected experiment, scenario, or candidate; add `--run` to execute it. `-s N` overrides the sample count for experiment or scenario executions. `--save-plan` writes JSON. The Python wrapper builds fixtures, starts Pulp, and invokes candidate setup before Locust begins recording; it destroys the services after Locust finishes and closes its measurements. The driver returns `RunResultMetadata` with request counts, failures, latency, and artifact paths.
 Runs and Locust artifacts go under `_juice/exeuctions/{execution_id}/{scenario}/{candidate}/{run}`; generated fixtures go under `_juice/fixture/`.
 
 ```bash
 uv run --locked pulp-juicer ls
 uv run --locked pulp-juicer show bucket-repository
 uv run --locked pulp-juicer squeeze bucket-repository
-uv run --locked pulp-juicer squeeze bucket-repository --scenario burst --run-id run001
+uv run --locked pulp-juicer squeeze bucket-repository --run
+uv run --locked pulp-juicer squeeze bucket-repository burst --run -s 3
+uv run --locked pulp-juicer squeeze bucket-repository burst normal --run
 uv run --locked --group report pulp-juicer report
 uv run --locked --group report pulp-juicer report bucket-repository__burst__001
 uv run --locked --group report pulp-juicer report bucket-repository__burst__001 --zip
 ```
 
-Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. A bare experiment name lists the available runs.
-Each squeeze gets a new numbered execution ID. Add `-f` to replace the latest execution for the selected scope.
+Without `--run`, the command lists the selected scope. A candidate execution produces one ad-hoc measurement.
+Each execution gets a new numbered ID. Add `-f` to replace the latest execution for the selected scope.
 `report` lists available execution IDs; pass one ID to generate its reports.
 
 

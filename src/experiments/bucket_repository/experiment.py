@@ -9,6 +9,7 @@ from pulp_juicer import (
     PreTestFunction,
     RequireFixture,
     ScenarioConfig,
+    sample_sequence,
     StepFunctionLoad,
     UnitaryImpulseLoad,
 )
@@ -69,29 +70,51 @@ EXPERIMENT = ExperimentConfig(
     ),
     scenarios=(
         ScenarioConfig(
-            id="calibrate",
-            description="Analyse system response to a big impulse load",
+            id="pull-through-1k-impulse",
+            description="Request 1,000 unique Maven artifacts in one impulse.",
             driver="http_get",
             requires=(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            run_order=(1, 2, 2, 1, 2, 2, 1, 1),
+            run_order=sample_sequence(n=3, candidates=(1, 2)),
             load=UnitaryImpulseLoad(request_count=1000),
         ),
         ScenarioConfig(
-            id="burst",
+            id="pull-through-1k-impulse-repeated-requests",
+            description="Request the same 100 Maven artifacts ten times in one impulse.",
+            driver="http_get",
+            requires=(
+                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
+            ),
+            input=scenario_input.build_pull_through_repeated,
+            run_order=sample_sequence(n=3, candidates=(1, 2)),
+            load=UnitaryImpulseLoad(request_count=1000),
+        ),
+        ScenarioConfig(
+            id="pull-through-step-30-users",
             description="Thirty concurrent users request 650 unique Maven artifacts.",
             driver="http_get",
             requires=(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_pull_through,
-            run_order=(1, 2, 2, 1),
+            run_order=sample_sequence(n=3, candidates=(1, 2)),
             load=StepFunctionLoad(
                 steps=(LoadStep(at_seconds=0, users=30),),
                 request_count=650,
             ),
+        ),
+        ScenarioConfig(
+            id="upload-impulse",
+            description="Upload/Add 100 unique Maven JARs to a repository.",
+            driver="http_upload",
+            requires=(
+                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
+            ),
+            input=scenario_input.build_upload,
+            run_order=sample_sequence(n=3, candidates=(1,2)),
+            load=UnitaryImpulseLoad(request_count=100),
         ),
         ScenarioConfig(
             id="tmp",
@@ -102,32 +125,11 @@ EXPERIMENT = ExperimentConfig(
             ),
             input=scenario_input.build_pull_through,
             run_order=(1, 2),
+            draft=True,
             load=StepFunctionLoad(
                 steps=(LoadStep(at_seconds=0, users=30),),
                 request_count=120,
             ),
-        ),
-        ScenarioConfig(
-            id="short-impulse",
-            description="Temporary experiments.",
-            driver="http_get",
-            requires=(
-                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
-            ),
-            input=scenario_input.build_pull_through,
-            run_order=(1, 2),
-            load=UnitaryImpulseLoad(request_count=1000),
-        ),
-        ScenarioConfig(
-            id="upload-impulse",
-            description="Upload 100 unique Maven JARs, then modify the normal repository.",
-            driver="http_upload",
-            requires=(
-                RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
-            ),
-            input=scenario_input.build_upload,
-            run_order=(1, 2),
-            load=UnitaryImpulseLoad(request_count=100),
         ),
     ),
 )
