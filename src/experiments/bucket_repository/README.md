@@ -52,7 +52,7 @@ The experiment modules do not import Locust.
 
 `build_test_plan` expands each scenario's `run_order` tuple into ordered `RunMetadata` records. Scenario declarations can call `sample_sequence(n, candidates)` to create that tuple; the helper gives every candidate N samples in alternating forward and reverse rounds. Each record identifies a scenario, candidate, and run ID and carries fixture metadata and load settings. Planning does not build fixtures or start services.
 `squeeze` lists the selected experiment, scenario, or candidate; add `--run` to execute it. `-s N` overrides the sample count for experiment or scenario executions. `--save-plan` writes JSON. The Python wrapper builds fixtures, starts Pulp, and invokes candidate setup before Locust begins recording; it destroys the services after Locust finishes and closes its measurements. The driver returns `RunResultMetadata` with request counts, failures, latency, and artifact paths.
-Runs and Locust artifacts go under `_juice/exeuctions/{execution_id}/{scenario}/{candidate}/{run}`; generated fixtures go under `_juice/fixture/`.
+Runs and Locust artifacts go under `_juice/executions/{execution_id}/{scenario}/{candidate}/{run}`; generated fixtures go under `_juice/fixture/`.
 
 ```bash
 uv run --locked pulp-juicer ls

@@ -133,7 +133,7 @@ class TestPlan(unittest.TestCase):
                 EXPERIMENT,
                 COMPOSE,
                 repository_root=root,
-                results_dir=root / "exeuctions",
+                results_dir=root / "executions",
             )
             self.assertEqual(len(plan.runs), TOTAL_RUNS)
             self.assertEqual(
@@ -157,7 +157,7 @@ class TestPlan(unittest.TestCase):
                 EXPERIMENT,
                 COMPOSE,
                 repository_root=root,
-                results_dir=root / "exeuctions",
+                results_dir=root / "executions",
             )
             self.assertEqual(
                 [(run.scenario_id, run.run_id) for run in repeated.runs],
@@ -206,7 +206,7 @@ class TestCli(unittest.TestCase):
     def test_results_lists_only_matching_experiment_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
-            results = workdir / "exeuctions"
+            results = workdir / "executions"
             current = (
                 results
                 / "bucket-repository__burst__normal__001"
@@ -350,7 +350,7 @@ class TestCli(unittest.TestCase):
     def test_clean_selected_data_keeps_plan_and_skips_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
-            results = workdir / "exeuctions"
+            results = workdir / "executions"
             fixtures = workdir / "fixture"
             results.mkdir(parents=True)
             fixtures.mkdir()
@@ -371,7 +371,7 @@ class TestCli(unittest.TestCase):
     def test_clean_all_removes_data_and_services(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
-            (workdir / "exeuctions").mkdir(parents=True)
+            (workdir / "executions").mkdir(parents=True)
             (workdir / "fixture").mkdir()
             with patch(
                 "pulp_juicer.cli.subprocess.run",
@@ -381,7 +381,7 @@ class TestCli(unittest.TestCase):
                     cli, ["clean", "all", "--workdir", str(workdir)]
                 )
             self.assertEqual(response.exit_code, 0, response.output)
-            self.assertFalse((workdir / "exeuctions").exists())
+            self.assertFalse((workdir / "executions").exists())
             self.assertFalse((workdir / "fixture").exists())
             self.assertEqual(docker.call_count, 2)
 
@@ -611,7 +611,7 @@ class TestCli(unittest.TestCase):
             )
             for plan in recorded:
                 self.assertEqual(
-                    plan.results_dir, workdir / "exeuctions" / plan.execution_id
+                    plan.results_dir, workdir / "executions" / plan.execution_id
                 )
                 self.assertTrue(plan.results_dir.is_dir())
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
@@ -675,14 +675,14 @@ class TestCli(unittest.TestCase):
                     created = CliRunner().invoke(cli, command)
                     self.assertEqual(created.exit_code, 0, created.output)
             first_root = (
-                workdir / "exeuctions" / "bucket-repository__burst__normal__001"
+                workdir / "executions" / "bucket-repository__burst__normal__001"
             )
             (first_root / "keep.txt").write_text("keep")
             latest_id = "bucket-repository__burst__normal__002"
-            result_root = workdir / "exeuctions" / latest_id
+            result_root = workdir / "executions" / latest_id
             (result_root / "old.txt").write_text("old")
             other_result = (
-                workdir / "exeuctions" / "bucket-repository__burst__003" / "keep.txt"
+                workdir / "executions" / "bucket-repository__burst__003" / "keep.txt"
             )
             other_result.parent.mkdir(parents=True)
             other_result.write_text("keep")
@@ -749,10 +749,10 @@ class TestCli(unittest.TestCase):
                 failed = CliRunner().invoke(cli, command)
             self.assertNotEqual(failed.exit_code, 0)
             execution_id = "bucket-repository__burst__normal__001"
-            self.assertTrue((workdir / "exeuctions" / execution_id).is_dir())
+            self.assertTrue((workdir / "executions" / execution_id).is_dir())
             compose_log = (
                 workdir
-                / "exeuctions"
+                / "executions"
                 / execution_id
                 / "burst"
                 / "normal"
@@ -762,7 +762,7 @@ class TestCli(unittest.TestCase):
             self.assertIn(f"Compose log: {compose_log}", failed.output)
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
             log_text = (
-                workdir / "exeuctions" / execution_id / "execution.log"
+                workdir / "executions" / execution_id / "execution.log"
             ).read_text()
             self.assertIn("Execution failed", log_text)
             self.assertIn("RuntimeError: failed", log_text)
@@ -810,7 +810,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertIn("10/10 requests, 2 failures", response.output)
             self.assertIn(
-                f"Compose log: {workdir / 'exeuctions' / 'bucket-repository__burst__normal__001' / 'burst' / 'normal' / 'run001' / 'compose.log'}",
+                f"Compose log: {workdir / 'executions' / 'bucket-repository__burst__normal__001' / 'burst' / 'normal' / 'run001' / 'compose.log'}",
                 response.output,
             )
             self.assertIn("Results:", response.output)
@@ -854,7 +854,7 @@ class TestCli(unittest.TestCase):
             self.assertNotEqual(response.exit_code, 0)
             compose_log = (
                 workdir
-                / "exeuctions"
+                / "executions"
                 / "bucket-repository__burst__normal__001"
                 / "burst"
                 / "normal"
@@ -889,7 +889,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(response.exit_code, 0, response.output)
             log_path = (
                 workdir
-                / "exeuctions"
+                / "executions"
                 / "bucket-repository__burst__normal__001"
                 / "execution.log"
             )

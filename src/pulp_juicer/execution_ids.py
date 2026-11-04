@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 _NUMBERED_EXECUTION = re.compile(r"^.+__(\d{3,})$")
-EXECUTIONS_DIRNAME = "exeuctions"
+EXECUTIONS_DIRNAME = "executions"
 
 
 def _existing_ids(workdir: Path) -> set[str]:
