@@ -2,7 +2,7 @@ services:
   pulp:
     build:
       context: ../../..
-      dockerfile: src/experiments/maven_pull_through/Containerfile
+      dockerfile: src/experiments/bucket_repository/Containerfile
       args:
         BASE_TAG: ${PULP_BASE_TAG:-latest}
       additional_contexts:

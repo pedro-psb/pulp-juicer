@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from experiments.maven_pull_through.experiment import EXPERIMENT
-from experiments.maven_pull_through.scenario_input import build_upload
+from experiments.bucket_repository.experiment import EXPERIMENT
+from experiments.bucket_repository.scenario_input import build_upload
 from pulp_juicer.plan import build_test_plan
 from pulp_juicer.types import ServiceFixtureMetadata, UnitaryImpulseLoad
 
@@ -15,7 +15,7 @@ class TestUploadScenario(unittest.TestCase):
     def test_upload_and_pull_through_share_fixture_directory(self):
         compose = (
             Path(__file__).resolve().parents[1]
-            / "src/experiments/maven_pull_through/compose.yaml"
+            / "src/experiments/bucket_repository/compose.yaml"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

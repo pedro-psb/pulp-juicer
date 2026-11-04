@@ -1,4 +1,4 @@
-"""Maven pull-through experiment definition."""
+"""Bucket repository experiment definition."""
 
 from pathlib import Path
 
@@ -17,10 +17,10 @@ from . import candidates, scenario_input
 from .data_service.fixture import MavenServiceFixture
 
 EXPERIMENT = ExperimentConfig(
-    id="maven-pull-through",
-    short_description="Compare Maven pull-through and upload candidates under load.",
+    id="bucket-repository",
+    short_description="Compare standard and bucket repositories under Maven load.",
     description=(
-        "Compare Maven pull-through and upload behavior across two Pulp candidates. "
+        "Compare Maven pull-through and upload behavior for standard and bucket repositories. "
         "Both workloads use the same generated artifact fixture, allowing response time "
         "and request completion to be compared across repeated runs."
     ),

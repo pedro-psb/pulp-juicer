@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from experiments.maven_pull_through.experiment import EXPERIMENT
+from experiments.bucket_repository.experiment import EXPERIMENT
 from pulp_juicer.execution import _compose_inputs
 from pulp_juicer.plan import build_test_plan
 from pulp_juicer.types import PulpConnection, ServiceFixtureMetadata
@@ -18,7 +18,7 @@ class TestMavenCandidateSetup(unittest.TestCase):
     def test_pulp_settings_apply_only_to_selected_candidate(self):
         compose = (
             Path(__file__).resolve().parents[1]
-            / "src/experiments/maven_pull_through/compose.yaml"
+            / "src/experiments/bucket_repository/compose.yaml"
         )
         with tempfile.TemporaryDirectory() as tmp:
             plan = build_test_plan(
@@ -88,7 +88,7 @@ class TestMavenCandidateSetup(unittest.TestCase):
                     {"pulp_href": "/distribution/", "base_url": "http://example/"},
                 )
                 with patch(
-                    "experiments.maven_pull_through.candidates.PulpClient",
+                    "experiments.bucket_repository.candidates.PulpClient",
                     return_value=client,
                 ):
                     setup_fn(PulpConnection(), {"maven": fixture}, "test")

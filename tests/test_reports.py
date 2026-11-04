@@ -483,8 +483,8 @@ class TestReportDiscovery(unittest.TestCase):
             response = CliRunner().invoke(cli, ["report", "--results", str(results)])
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertIn("No executions found", response.output)
-            (results / "maven-pull-through__002").mkdir(parents=True)
-            (results / "maven-pull-through__001").mkdir()
+            (results / "bucket-repository__002").mkdir(parents=True)
+            (results / "bucket-repository__001").mkdir()
             (results / "unrelated").mkdir()
             with patch("pulp_juicer.cli.render_report") as render:
                 listed = CliRunner().invoke(cli, ["report", "--results", str(results)])
@@ -493,8 +493,8 @@ class TestReportDiscovery(unittest.TestCase):
                 listed.output.splitlines(),
                 [
                     "Available execution IDs:",
-                    "  maven-pull-through__001",
-                    "  maven-pull-through__002",
+                    "  bucket-repository__001",
+                    "  bucket-repository__002",
                     "Use pulp-juicer report EXECUTION_ID to generate its reports.",
                 ],
             )
@@ -503,7 +503,7 @@ class TestReportDiscovery(unittest.TestCase):
     def test_report_zip_contains_reports_and_source_data_and_reuses_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp) / "results"
-            execution = results / "maven-pull-through__001"
+            execution = results / "bucket-repository__001"
             run_dir = execution / "upload-impulse" / "normal" / "run001"
             collectors = run_dir / "collectors"
             collectors.mkdir(parents=True)
@@ -557,8 +557,8 @@ class TestReportDiscovery(unittest.TestCase):
     def test_report_command_selects_one_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp)
-            selected = results / "maven-pull-through__short-impulse__018"
-            other = results / "maven-pull-through__short-impulse__019"
+            selected = results / "bucket-repository__short-impulse__018"
+            other = results / "bucket-repository__short-impulse__019"
             selected.mkdir()
             other.mkdir()
             with (
@@ -580,7 +580,7 @@ class TestReportDiscovery(unittest.TestCase):
                 cli,
                 [
                     "report",
-                    "maven-pull-through__short-impulse__020",
+                    "bucket-repository__short-impulse__020",
                     "--results",
                     str(results),
                 ],
@@ -592,7 +592,7 @@ class TestReportDiscovery(unittest.TestCase):
                 cli,
                 [
                     "report",
-                    "../maven-pull-through__short-impulse__018",
+                    "../bucket-repository__short-impulse__018",
                     "--results",
                     str(results),
                 ],
@@ -603,9 +603,9 @@ class TestReportDiscovery(unittest.TestCase):
     def test_report_command_renders_selected_execution_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp) / "results"
-            first = results / "maven-pull-through__burst__run001__001"
-            second = results / "maven-pull-through__burst__run001__002"
-            existing = results / "maven-pull-through__burst__run001__003"
+            first = results / "bucket-repository__burst__run001__001"
+            second = results / "bucket-repository__burst__run001__002"
+            existing = results / "bucket-repository__burst__run001__003"
             for execution in (first, second):
                 run_dir = execution / "burst" / "normal" / "run001"
                 run_dir.mkdir(parents=True)
@@ -674,7 +674,7 @@ class TestReportDiscovery(unittest.TestCase):
 
     def test_trial_report_compares_run_level_results_and_overlays(self):
         with tempfile.TemporaryDirectory() as tmp:
-            execution = Path(tmp) / "maven-pull-through__burst__001"
+            execution = Path(tmp) / "bucket-repository__burst__001"
             execution.mkdir()
             cases = (
                 ("burst", "normal", "run001", 10, 100, 200, 50),
@@ -960,7 +960,7 @@ class TestReportDiscovery(unittest.TestCase):
     def test_existing_report_needs_no_quarto(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp) / "results"
-            execution = results / "maven-pull-through__001"
+            execution = results / "bucket-repository__001"
             execution.mkdir(parents=True)
             (execution / "report.html").write_text("existing")
             (execution / "trials.html").write_text("existing trials")

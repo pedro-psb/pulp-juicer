@@ -27,7 +27,7 @@ def build_pull_through(
         "requests": [
             {
                 "path": artifact["path"],
-                "name": "maven-pull-through",
+                "name": "bucket-repository",
                 "expected_status": 200,
                 "sha256": artifact["sha256"],
             }

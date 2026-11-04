@@ -14,8 +14,8 @@ setup.json
 .env
 settings/*
 !settings/settings.py
-src/experiments/maven_pull_through/settings/*
-!src/experiments/maven_pull_through/settings/settings.py
+src/experiments/bucket_repository/settings/*
+!src/experiments/bucket_repository/settings/settings.py
 
 # Python tools
 __pycache__/

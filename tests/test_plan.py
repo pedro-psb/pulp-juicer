@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from experiments.maven_pull_through.experiment import EXPERIMENT
+from experiments.bucket_repository.experiment import EXPERIMENT
 from pulp_juicer.cli import cli
 from pulp_juicer.plan import build_test_plan
 from pulp_juicer.plan_file import load_plan_file, write_plan_file
@@ -18,7 +18,7 @@ from pulp_juicer.types import LoadStep, StepFunctionLoad, UnitaryImpulseLoad
 
 COMPOSE = (
     Path(__file__).resolve().parents[1]
-    / "src/experiments/maven_pull_through/compose.yaml"
+    / "src/experiments/bucket_repository/compose.yaml"
 )
 TOTAL_RUNS = sum(len(scenario.run_order) for scenario in EXPERIMENT.scenarios)
 
@@ -155,40 +155,40 @@ class TestCli(unittest.TestCase):
             results = workdir / "exeuctions"
             current = (
                 results
-                / "maven-pull-through__burst__run001__001"
+                / "bucket-repository__burst__run001__001"
                 / "burst"
                 / "normal"
                 / "run001"
             )
             earlier = (
                 results
-                / "maven-pull-through__moderate__002"
+                / "bucket-repository__moderate__002"
                 / "moderate"
                 / "staging"
                 / "run002"
             )
             other = results / "another-experiment__003" / "other" / "normal" / "run001"
             incomplete = (
-                results / "maven-pull-through__tmp__004" / "tmp" / "normal" / "run001"
+                results / "bucket-repository__tmp__004" / "tmp" / "normal" / "run001"
             )
             for directory in (current, earlier, other, incomplete):
                 directory.mkdir(parents=True)
             (current / "run_metadata.json").write_text(
-                json.dumps({"experiment": "maven-pull-through"})
+                json.dumps({"experiment": "bucket-repository"})
             )
             (earlier / "run_metadata.json").write_text(
-                json.dumps({"project": "pulp-juicer-maven-pull-through"})
+                json.dumps({"project": "pulp-juicer-bucket-repository"})
             )
             (other / "run_metadata.json").write_text(
                 json.dumps(
                     {
                         "experiment": "another-experiment",
-                        "project": "pulp-juicer-maven-pull-through",
+                        "project": "pulp-juicer-bucket-repository",
                     }
                 )
             )
 
-            command = ["results", "maven-pull-through", "--workdir", str(workdir)]
+            command = ["results", "bucket-repository", "--workdir", str(workdir)]
             response = CliRunner().invoke(cli, command)
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertEqual(response.output.splitlines(), [str(current), str(earlier)])
@@ -214,7 +214,7 @@ class TestCli(unittest.TestCase):
                     str(earlier_report / "report.html"),
                 ],
             )
-            self.assertFalse((workdir / "plan-maven-pull-through.json").exists())
+            self.assertFalse((workdir / "plan-bucket-repository.json").exists())
 
             unknown = CliRunner().invoke(
                 cli, ["results", "unknown", "--workdir", str(workdir)]
@@ -230,8 +230,8 @@ class TestCli(unittest.TestCase):
     def test_ps_lists_only_pulp_juicer_compose_services(self):
         output = (
             "aaaaaaaaaaaa\tother-project\tdb\tother-db-1\tUp 2 hours\t5432/tcp\n"
-            "bbbbbbbbbbbb\tpulp-juicer-maven-pull-through\tpulp\tpulp-juicer-maven-pull-through-pulp-1\tUp 1 minute (healthy)\t127.0.0.1:5001->80/tcp\n"
-            "cccccccccccc\tpulp-juicer-maven-pull-through\tmaven_fixture\tpulp-juicer-maven-pull-through-maven_fixture-1\tExited (0)\t\n"
+            "bbbbbbbbbbbb\tpulp-juicer-bucket-repository\tpulp\tpulp-juicer-bucket-repository-pulp-1\tUp 1 minute (healthy)\t127.0.0.1:5001->80/tcp\n"
+            "cccccccccccc\tpulp-juicer-bucket-repository\tmaven_fixture\tpulp-juicer-bucket-repository-maven_fixture-1\tExited (0)\t\n"
         )
         with patch(
             "pulp_juicer.cli.subprocess.run",
@@ -239,7 +239,7 @@ class TestCli(unittest.TestCase):
         ) as docker:
             result = CliRunner().invoke(cli, ["ps"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("pulp-juicer-maven-pull-through", result.output)
+        self.assertIn("pulp-juicer-bucket-repository", result.output)
         self.assertIn("maven_fixture", result.output)
         self.assertIn("Exited (0)", result.output)
         self.assertNotIn("other-project", result.output)
@@ -263,14 +263,14 @@ class TestCli(unittest.TestCase):
                 return SimpleNamespace(
                     stdout=(
                         "aaaaaaaaaaaa\tother-project\tdb\tother-db-1\tUp\t\n"
-                        "bbbbbbbbbbbb\tpulp-juicer-maven-pull-through\tpulp\tpulp-1\tUp\t\n"
+                        "bbbbbbbbbbbb\tpulp-juicer-bucket-repository\tpulp\tpulp-1\tUp\t\n"
                     )
                 )
             if command[1:3] == ["network", "ls"]:
                 return SimpleNamespace(
                     stdout=(
                         "cccccccccccc\tother-project\tother_default\n"
-                        "dddddddddddd\tpulp-juicer-maven-pull-through\tpulp-juicer_default\n"
+                        "dddddddddddd\tpulp-juicer-bucket-repository\tpulp-juicer_default\n"
                     )
                 )
             return SimpleNamespace(stdout="")
@@ -302,7 +302,7 @@ class TestCli(unittest.TestCase):
             fixtures.mkdir()
             (results / "run_metadata.json").write_text("result")
             (fixtures / "manifest.json").write_text("fixture")
-            plan_file = workdir / "plan-maven-pull-through.json"
+            plan_file = workdir / "plan-bucket-repository.json"
             plan_file.write_text("plan")
             with patch("pulp_juicer.cli.subprocess.run") as docker:
                 response = CliRunner().invoke(
@@ -350,7 +350,7 @@ class TestCli(unittest.TestCase):
         run_without_experiment = runner.invoke(cli, ["squeeze"])
         self.assertEqual(run_without_experiment.exit_code, 2)
         self.assertIn(
-            "maven-pull-through: Compare Maven pull-through and upload candidates under load.",
+            "bucket-repository: Compare standard and bucket repositories under Maven load.",
             run_without_experiment.output,
         )
         self.assertNotIn("  burst:", run_without_experiment.output)
@@ -363,7 +363,7 @@ class TestCli(unittest.TestCase):
         )
         self.assertNotIn("Usage:", run_without_experiment.output)
         self.assertIn(
-            "maven-pull-through: Compare Maven pull-through and upload candidates under load.",
+            "bucket-repository: Compare standard and bucket repositories under Maven load.",
             listed.output,
         )
         self.assertIn(
@@ -377,7 +377,7 @@ class TestCli(unittest.TestCase):
         self.assertNotIn("response time and request completion", listed.output)
         self.assertNotIn("Runs:", listed.output)
         self.assertNotEqual(
-            runner.invoke(cli, ["ls", "maven-pull-through"]).exit_code, 0
+            runner.invoke(cli, ["ls", "bucket-repository"]).exit_code, 0
         )
 
         shown_without_experiment = runner.invoke(cli, ["show"])
@@ -386,7 +386,7 @@ class TestCli(unittest.TestCase):
         )
         self.assertIn("Available experiments:\n", shown_without_experiment.output)
         self.assertIn(
-            "maven-pull-through: Compare Maven pull-through and upload candidates under load.",
+            "bucket-repository: Compare standard and bucket repositories under Maven load.",
             shown_without_experiment.output,
         )
         self.assertIn(
@@ -396,10 +396,10 @@ class TestCli(unittest.TestCase):
         self.assertNotIn("  burst:", shown_without_experiment.output)
         self.assertNotIn("Required sources:", shown_without_experiment.output)
 
-        shown = runner.invoke(cli, ["show", "maven-pull-through"])
+        shown = runner.invoke(cli, ["show", "bucket-repository"])
         self.assertEqual(shown.exit_code, 0, shown.output)
         self.assertNotIn(
-            "Compare Maven pull-through and upload candidates under load.",
+            "Compare standard and bucket repositories under Maven load.",
             shown.output,
         )
         self.assertIn("response time and request completion", shown.output)
@@ -433,10 +433,10 @@ class TestCli(unittest.TestCase):
         self.assertIn("Unknown experiment: missing", unknown.output)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
-            command = ["squeeze", "maven-pull-through", "--workdir", str(workdir)]
+            command = ["squeeze", "bucket-repository", "--workdir", str(workdir)]
             listed = runner.invoke(cli, command)
             self.assertEqual(listed.exit_code, 0, listed.output)
-            self.assertIn("Available runs for maven-pull-through", listed.output)
+            self.assertIn("Available runs for bucket-repository", listed.output)
             self.assertFalse(workdir.exists())
 
             recorded = []
@@ -447,7 +447,7 @@ class TestCli(unittest.TestCase):
                 selected = runner.invoke(cli, [*command, "--scenario", "burst"])
             self.assertEqual(selected.exit_code, 0, selected.output)
             self.assertEqual(len(recorded[0].runs), 4)
-            self.assertEqual(recorded[0].execution_id, "maven-pull-through__burst__001")
+            self.assertEqual(recorded[0].execution_id, "bucket-repository__burst__001")
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
             self.assertTrue(recorded[0].results_dir.is_dir())
 
@@ -456,12 +456,12 @@ class TestCli(unittest.TestCase):
                     cli, [*command, "--scenario", "burst", "--save-plan"]
                 )
             self.assertEqual(saved.exit_code, 0, saved.output)
-            plan_file = workdir / "plan-maven-pull-through__burst__002.json"
+            plan_file = workdir / "plan-bucket-repository__burst__002.json"
             self.assertIn(f"Plan: {plan_file}", saved.output)
             self.assertEqual(len(load_plan_file(plan_file).runs), 4)
             data = json.loads(plan_file.read_text())
             self.assertNotIn("password", data["runtime"]["pulp_connection"])
-            self.assertEqual(data["execution_id"], "maven-pull-through__burst__002")
+            self.assertEqual(data["execution_id"], "bucket-repository__burst__002")
             saved_candidate = data["scenarios"][0]["runs"][0]["candidate"]
             self.assertEqual(
                 saved_candidate["description"],
@@ -479,7 +479,7 @@ class TestCli(unittest.TestCase):
     def test_squeeze_executes_each_scope_from_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
-            command = ["squeeze", "maven-pull-through", "--workdir", str(workdir)]
+            command = ["squeeze", "bucket-repository", "--workdir", str(workdir)]
             recorded = []
 
             def fake_execute(plan, **kwargs):
@@ -498,9 +498,9 @@ class TestCli(unittest.TestCase):
             self.assertEqual(
                 [plan.execution_id for plan in recorded],
                 [
-                    "maven-pull-through__001",
-                    "maven-pull-through__burst__002",
-                    "maven-pull-through__burst__run002__003",
+                    "bucket-repository__001",
+                    "bucket-repository__burst__002",
+                    "bucket-repository__burst__run002__003",
                 ],
             )
             self.assertEqual([len(plan.runs) for plan in recorded], [TOTAL_RUNS, 4, 1])
@@ -517,7 +517,7 @@ class TestCli(unittest.TestCase):
             workdir = Path(tmp) / "_juice"
             command = [
                 "squeeze",
-                "maven-pull-through",
+                "bucket-repository",
                 "--workdir",
                 str(workdir),
                 "--scenario",
@@ -538,7 +538,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(repeated.exit_code, 0, repeated.output)
             self.assertEqual(
                 execute.call_args.args[0].execution_id,
-                "maven-pull-through__burst__run001__002",
+                "bucket-repository__burst__run001__002",
             )
             self.assertTrue((first_result / "keep.txt").is_file())
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
@@ -552,7 +552,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(after_clean.exit_code, 0, after_clean.output)
             self.assertEqual(
                 execute.call_args.args[0].execution_id,
-                "maven-pull-through__burst__run001__003",
+                "bucket-repository__burst__run001__003",
             )
 
     def test_force_replaces_latest_matching_execution_only(self):
@@ -560,7 +560,7 @@ class TestCli(unittest.TestCase):
             workdir = Path(tmp) / "_juice"
             command = [
                 "squeeze",
-                "maven-pull-through",
+                "bucket-repository",
                 "--workdir",
                 str(workdir),
                 "--scenario",
@@ -573,14 +573,14 @@ class TestCli(unittest.TestCase):
                     created = CliRunner().invoke(cli, command)
                     self.assertEqual(created.exit_code, 0, created.output)
             first_root = (
-                workdir / "exeuctions" / "maven-pull-through__burst__run001__001"
+                workdir / "exeuctions" / "bucket-repository__burst__run001__001"
             )
             (first_root / "keep.txt").write_text("keep")
-            latest_id = "maven-pull-through__burst__run001__002"
+            latest_id = "bucket-repository__burst__run001__002"
             result_root = workdir / "exeuctions" / latest_id
             (result_root / "old.txt").write_text("old")
             other_result = (
-                workdir / "exeuctions" / "maven-pull-through__burst__003" / "keep.txt"
+                workdir / "exeuctions" / "bucket-repository__burst__003" / "keep.txt"
             )
             other_result.parent.mkdir(parents=True)
             other_result.write_text("keep")
@@ -605,7 +605,7 @@ class TestCli(unittest.TestCase):
             workdir = Path(tmp) / "_juice"
             command = [
                 "squeeze",
-                "maven-pull-through",
+                "bucket-repository",
                 "--workdir",
                 str(workdir),
                 "--scenario",
@@ -620,7 +620,7 @@ class TestCli(unittest.TestCase):
                 self.assertEqual(replaced.exit_code, 0, replaced.output)
             self.assertEqual(list(workdir.glob("plan-*.json")), [])
             self.assertIn(
-                "Execution: maven-pull-through__burst__run001__001", replaced.output
+                "Execution: bucket-repository__burst__run001__001", replaced.output
             )
 
     def test_failed_squeeze_can_be_replaced_without_a_saved_plan(self):
@@ -628,7 +628,7 @@ class TestCli(unittest.TestCase):
             workdir = Path(tmp) / "_juice"
             command = [
                 "squeeze",
-                "maven-pull-through",
+                "bucket-repository",
                 "--workdir",
                 str(workdir),
                 "--scenario",
@@ -648,7 +648,7 @@ class TestCli(unittest.TestCase):
             ):
                 failed = CliRunner().invoke(cli, command)
             self.assertNotEqual(failed.exit_code, 0)
-            execution_id = "maven-pull-through__burst__run001__001"
+            execution_id = "bucket-repository__burst__run001__001"
             self.assertTrue((workdir / "exeuctions" / execution_id).is_dir())
             compose_log = (
                 workdir
@@ -677,7 +677,7 @@ class TestCli(unittest.TestCase):
             workdir = Path(tmp) / "_juice"
             command = [
                 "squeeze",
-                "maven-pull-through",
+                "bucket-repository",
                 "--workdir",
                 str(workdir),
                 "--scenario",
@@ -711,7 +711,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertIn("10/10 requests, 2 failures", response.output)
             self.assertIn(
-                f"Compose log: {workdir / 'exeuctions' / 'maven-pull-through__burst__run001__001' / 'burst' / 'normal' / 'run001' / 'compose.log'}",
+                f"Compose log: {workdir / 'exeuctions' / 'bucket-repository__burst__run001__001' / 'burst' / 'normal' / 'run001' / 'compose.log'}",
                 response.output,
             )
             self.assertIn("Results:", response.output)
@@ -743,7 +743,7 @@ class TestCli(unittest.TestCase):
                     cli,
                     [
                         "squeeze",
-                        "maven-pull-through",
+                        "bucket-repository",
                         "--workdir",
                         str(workdir),
                         "--scenario",
@@ -757,7 +757,7 @@ class TestCli(unittest.TestCase):
             compose_log = (
                 workdir
                 / "exeuctions"
-                / "maven-pull-through__burst__run001__001"
+                / "bucket-repository__burst__run001__001"
                 / "burst"
                 / "normal"
                 / "run001"
@@ -771,7 +771,7 @@ class TestCli(unittest.TestCase):
             workdir = Path(tmp) / "_juice"
             command = [
                 "squeeze",
-                "maven-pull-through",
+                "bucket-repository",
                 "--workdir",
                 str(workdir),
                 "--scenario",
@@ -793,7 +793,7 @@ class TestCli(unittest.TestCase):
             log_path = (
                 workdir
                 / "exeuctions"
-                / "maven-pull-through__burst__run001__001"
+                / "bucket-repository__burst__run001__001"
                 / "execution.log"
             )
             self.assertIn(f"Log: {log_path}", response.output)
@@ -809,7 +809,7 @@ class TestCli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             command = [
                 "squeeze",
-                "maven-pull-through",
+                "bucket-repository",
                 "--workdir",
                 str(Path(tmp) / "_juice"),
             ]
@@ -827,7 +827,7 @@ class TestCli(unittest.TestCase):
             workdir = Path(tmp) / "_juice"
             command = [
                 "squeeze",
-                "maven-pull-through",
+                "bucket-repository",
                 "--workdir",
                 str(workdir),
                 "--post-debug",
@@ -851,7 +851,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(len(execute.call_args.args[0].runs), 1)
             self.assertIn("Post-debug: services are still running", response.output)
             self.assertIn(
-                "export COMPOSE_PROJECT_NAME=pulp-juicer-maven-pull-through",
+                "export COMPOSE_PROJECT_NAME=pulp-juicer-bucket-repository",
                 response.output,
             )
             self.assertIn(f"export COMPOSE_FILE={COMPOSE}", response.output)

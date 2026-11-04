@@ -1,9 +1,9 @@
-# Maven pull-through and upload experiment
+# Bucket repository experiment
 
 `experiment.py` defines fixture instances, candidates, scenarios, and run order.
 Candidate IDs are positive integers.
 Each scenario uses its own `request_count`, which may be less than the fixture capacity.
-Each candidate has a short description shown by `pulp-juicer show maven-pull-through`.
+Each candidate has a short description shown by `pulp-juicer show bucket-repository`.
 `UnitaryImpulseLoad(request_count=N)` starts N users, each making one request. `StepFunctionLoad` changes the target user count at each `LoadStep(at_seconds, users)` and derives a spawn rate for each change. Burst and temporary scenarios currently have one step, preserving their user targets and request counts. Duration, waits, and timeouts use profile defaults.
 The burst scenario runs normal and staging twice. Pulp volumes are reset before every run; generated fixture data remains on disk.
 The `upload-impulse` scenario reuses those JAR files for 100 concurrent multipart POSTs to Maven's synchronous upload endpoint. Each request includes a unique `relative_path`. Staging uploads include the repository so Pulp stages each content unit; normal uploads collect the returned content HREFs and end with one repository modify request that adds them all. HTTP Basic credentials are supplied only at execution time.
@@ -27,7 +27,7 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - `candidates.py` defines one setup function per candidate, used by their `PreTestFunction` records. They configure Maven resources using `pulp_juicer.PulpClient`.
 - `data_service/compose.yaml` defines the upstream HTTP service.
 - `data_service/fixture.py` implements `MavenServiceFixture.build` and `generate_metadata`.
-  Run it as a module to generate a small fixture and print its metadata: `python -m experiments.maven_pull_through.data_service.fixture --count 10 --size 1024`.
+  Run it as a module to generate a small fixture and print its metadata: `python -m experiments.bucket_repository.data_service.fixture --count 10 --size 1024`.
 - `scenario_input.py` combines fixture and candidate setup results with the load into a serializable request specification.
 
 The Containerfile builds and installs the collector RPM with `rpm-rs` and installs PyArrow and psutil into the image with `uv`. To build the RPM outside Docker for inspection, run `uv run --locked python src/pulp_juicer/collector/build_rpm.py _juice/rpm` from the repository root.
@@ -56,12 +56,12 @@ Runs and Locust artifacts go under `_juice/exeuctions/{execution_id}/{scenario}/
 
 ```bash
 uv run --locked pulp-juicer ls
-uv run --locked pulp-juicer show maven-pull-through
-uv run --locked pulp-juicer squeeze maven-pull-through
-uv run --locked pulp-juicer squeeze maven-pull-through --scenario burst --run-id run001
+uv run --locked pulp-juicer show bucket-repository
+uv run --locked pulp-juicer squeeze bucket-repository
+uv run --locked pulp-juicer squeeze bucket-repository --scenario burst --run-id run001
 uv run --locked --group report pulp-juicer report
-uv run --locked --group report pulp-juicer report maven-pull-through__burst__001
-uv run --locked --group report pulp-juicer report maven-pull-through__burst__001 --zip
+uv run --locked --group report pulp-juicer report bucket-repository__burst__001
+uv run --locked --group report pulp-juicer report bucket-repository__burst__001 --zip
 ```
 
 Omit `--run-id` to run the whole scenario, or use `--all` to run the whole experiment. A bare experiment name lists the available runs.

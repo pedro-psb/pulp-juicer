@@ -4,12 +4,12 @@ from pathlib import Path
 
 
 def experiments():
-    from experiments.maven_pull_through.experiment import EXPERIMENT
+    from experiments.bucket_repository.experiment import EXPERIMENT
 
     compose = (
         Path(__file__).resolve().parents[1]
         / "experiments"
-        / "maven_pull_through"
+        / "bucket_repository"
         / "compose.yaml"
     )
     return {EXPERIMENT.id: (EXPERIMENT, compose)}
