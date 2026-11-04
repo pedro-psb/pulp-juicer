@@ -26,7 +26,7 @@ Add `-s N` to a `--run` command to use N samples per candidate, or name a candid
 Run `pulp-juicer squeeze --help` for all options.
 
 Executions write data and a ZIP archive under `_juice/executions/`.
-Completed measurements also produce HTML reports.
+Completed measurements also produce four linked HTML pages: summary statistics, timelines, trial comparison, and detailed results.
 To find or regenerate a report:
 
 ```bash

@@ -28,11 +28,12 @@ from .collector_metrics import (
 from .execution_timing import PHASES, read_execution_timings
 from .postgres_metrics import read_postgres_samples, summarize_postgres
 from .report import completed_runs, markdown_value
+from .report_navigation import navigation_html
 from .result_data import graph_path, normalize_execution, normalize_run, read_rows
-from .tasking import task_metrics, wait_distribution_chart
+from .tasking import task_metrics, task_state_series, wait_distribution_chart
 
 _COLORS = ("#2563eb", "#e56b35", "#16a34a", "#a855f7", "#dc2626", "#0891b2")
-_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 28 -->"
+_TRIAL_LAYOUT_MARKER = "<!-- pulp-juicer-trial-layout: 29 -->"
 _METRICS = (
     ("completed", "Cumulative completed requests", "Completed requests (count)"),
     ("throughput", "Completed requests per second", "Completed requests/s"),
@@ -175,21 +176,31 @@ def _timeline(run_dir: Path, metadata: dict | None):
 
 
 def _task_series(tasks: list[dict], metadata: dict | None):
+    timestamps = [
+        row[field]
+        for row in tasks
+        for field in (
+            "created_at_utc",
+            "unblocked_at_utc",
+            "started_at_utc",
+            "finished_at_utc",
+        )
+        if row.get(field)
+    ]
+    if not timestamps:
+        return {}
     starts = [row["started_at_utc"] for row in tasks if row["started_at_utc"]]
     completions = [
         row["finished_at_utc"]
         for row in tasks
         if row["status"] == "completed" and row["finished_at_utc"]
     ]
-    if not starts and not completions:
-        return {}
     saved_start = (metadata or {}).get("result", {}).get("load_start_utc")
-    origin = (
-        datetime.fromisoformat(saved_start)
-        if saved_start
-        else min([*starts, *completions])
-    )
-    series = {}
+    origin = datetime.fromisoformat(saved_start) if saved_start else min(timestamps)
+    series = {
+        f"task_{name}": points
+        for name, points in task_state_series(tasks, origin).items()
+    }
     for name, events in (("task_starts", starts), ("task_completions", completions)):
         if events:
             counts = Counter(
@@ -337,9 +348,11 @@ def _wait_boxplot(path, groups, colors):
             f'<line x1="{x(high):.1f}" y1="{y - 12:.1f}" x2="{x(high):.1f}" y2="{y + 12:.1f}" stroke="{color}" stroke-width="2"/>',
             f'<rect x="{x(q1):.1f}" y="{y - 14:.1f}" width="{max(1, x(q3) - x(q1)):.1f}" height="28" fill="{color}" fill-opacity="0.22" stroke="{color}"/>',
             f'<line x1="{x(middle):.1f}" y1="{y - 14:.1f}" x2="{x(middle):.1f}" y2="{y + 14:.1f}" stroke="{color}" stroke-width="3"/>',
-            f'<text x="{x(middle) + (8 if middle <= x_max * 0.8 else -8):.1f}" '
-            f'y="{y - 20:.1f}" text-anchor="{("start" if middle <= x_max * 0.8 else "end")}" '
-            f'fill="{color}">{middle:,.2f} ms</text>',
+            (
+                f'<text x="{x(middle) + (8 if middle <= x_max * 0.8 else -8):.1f}" '
+                f'y="{y - 20:.1f}" text-anchor="{("start" if middle <= x_max * 0.8 else "end")}" '
+                f'fill="{color}">{middle:,.2f} ms</text>'
+            ),
         ]
         for run_id, value, count in runs:
             items.append(
@@ -693,10 +706,14 @@ def _chart(
         )
         legend_y = legend_top + len(groups) * 44 + index * 22
         items += [
-            f'<line x1="{left}" y1="{legend_y}" x2="{left + 25}" y2="{legend_y}" '
-            f'stroke="{color}" stroke-width="2"{dash}/>',
-            f'<text x="{left + 34}" y="{legend_y + 4}" font-family="sans-serif" '
-            f'font-size="12" fill="#475569">{title} (right)</text>',
+            (
+                f'<line x1="{left}" y1="{legend_y}" x2="{left + 25}" y2="{legend_y}" '
+                f'stroke="{color}" stroke-width="2"{dash}/>'
+            ),
+            (
+                f'<text x="{left + 34}" y="{legend_y + 4}" font-family="sans-serif" '
+                f'font-size="12" fill="#475569">{title} (right)</text>'
+            ),
         ]
     items += [
         (
@@ -1105,6 +1122,10 @@ def render_trial_report(
             )
             for path in execution_dir.glob(pattern)
         )
+        data_is_newer |= (
+            Path(__file__).with_name("report_navigation.py").stat().st_mtime_ns
+            > report.stat().st_mtime_ns
+        )
         if not data_is_newer and (
             not source.is_file() or _TRIAL_LAYOUT_MARKER in source.read_text()
         ):
@@ -1141,6 +1162,10 @@ def render_trial_report(
         "---",
         "",
         _TRIAL_LAYOUT_MARKER,
+        "",
+        "```{=html}",
+        navigation_html("trials.html"),
+        "```",
         "",
         "# Trial and candidate comparison",
         "",

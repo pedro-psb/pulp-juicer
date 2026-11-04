@@ -96,7 +96,13 @@ def write_plan_file(plan: TestPlanMetadata) -> Path:
 
 
 def _hydrate_run(
-    unit: dict, scenario_id: str, experiment, templates, candidates, input_builder
+    unit: dict,
+    scenario_id: str,
+    experiment,
+    templates,
+    candidates,
+    input_builder,
+    scenario_setup=None,
 ) -> RunMetadata:
     candidate_data = dict(unit["candidate"])
     candidate_id = candidate_data["id"]
@@ -149,6 +155,7 @@ def _hydrate_run(
         driver=unit["driver"],
         input_builder=input_builder,
         result_dir=Path(unit["result_dir"]),
+        scenario_setup=scenario_setup,
     )
 
 
@@ -199,6 +206,7 @@ def load_plan_file(
                         templates,
                         candidates,
                         scenarios[current_id].input,
+                        scenarios[current_id].setup_fn,
                     )
                 )
     if scenario_id is not None and scenario_id not in seen_scenarios:

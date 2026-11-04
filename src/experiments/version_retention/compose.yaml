@@ -1,0 +1,36 @@
+services:
+  pulp:
+    build:
+      context: ../../..
+      dockerfile: src/experiments/version_retention/Containerfile
+      args:
+        BASE_TAG: ${PULP_BASE_TAG:-latest}
+      additional_contexts:
+        pulpcore_src: ${PULPCORE_REPO:-../../../../pulpcore}
+    image: version-retention-pulp:local
+    environment:
+      PULP_SETTINGS: /etc/pulp/settings.py
+      PULP_DEFAULT_ADMIN_PASSWORD: ${PULP_PASSWORD:-password}
+      PULP_PORT: ${PULP_PORT:-5001}
+      PULP_API_WORKERS: ${PULP_API_WORKERS:-1}
+      PULP_CONTENT_WORKERS: ${PULP_CONTENT_WORKERS:-1}
+      PULP_WORKERS: ${PULP_WORKERS:-2}
+      PULP_SECRET_KEY: ${PULP_SECRET_KEY:-version-retention-local-only-secret-key}
+    ports:
+      - "127.0.0.1:${PULP_PORT:-5001}:80"
+    volumes:
+      - ./settings:/etc/pulp:Z
+      - pulp_storage:/var/lib/pulp
+      - pgsql:/var/lib/pgsql
+      - containers:/var/lib/containers
+      - container_build:/var/lib/pulp/.local/share/containers
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/pulp/api/v3/status/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+volumes:
+  pulp_storage:
+  pgsql:
+  containers:
+  container_build:

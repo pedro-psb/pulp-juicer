@@ -3,6 +3,7 @@
 import math
 import statistics
 from collections import Counter, defaultdict
+from itertools import pairwise
 
 from .collector_metrics import MIB, read_samples
 from .execution_timing import PHASES
@@ -456,7 +457,7 @@ def summarize_run(trial, markers, timing):
     )
     spacing = [
         max(0, (later["timestamp_utc"] - earlier["timestamp_utc"]).total_seconds())
-        for earlier, later in zip(ordered, ordered[1:])
+        for earlier, later in pairwise(ordered)
     ]
     default_interval = statistics.median(spacing) if spacing else 1.0
     for key, source, scale in temp_fields:
@@ -534,4 +535,60 @@ def summarize_candidate(runs):
                 }
         if available:
             result[key] = available
+    return result
+
+
+_TASK_TYPE_FIELDS = ("count", "duration_mean", "duration_p95", "duration_total")
+
+
+def summarize_task_types(tasks):
+    """Count tasks and summarize execution duration within each task type."""
+    grouped = defaultdict(list)
+    for task in tasks or ():
+        if task.get("task_type"):
+            grouped[task["task_type"]].append(task)
+    result = {}
+    for task_type, rows in sorted(grouped.items()):
+        durations = [
+            row["execution_time_us"] / 1000
+            for row in rows
+            if row.get("execution_time_us") is not None
+        ]
+        summary = {"count": len(rows)}
+        measured = distribution(durations, total=sum(durations))
+        if measured:
+            summary.update(
+                duration_mean=measured["mean"],
+                duration_p95=measured["p95"],
+                duration_total=measured["total"],
+            )
+        result[task_type] = summary
+    return result
+
+
+def summarize_candidate_task_types(runs):
+    """Give each run one observation per task-type count or duration statistic."""
+    task_types = sorted(
+        {task_type for run in runs for task_type in run.get("task_types", {})}
+    )
+    result = {}
+    for task_type in task_types:
+        fields = {}
+        for field in _TASK_TYPE_FIELDS:
+            values = [
+                run.get("task_types", {}).get(task_type, {}).get(field, 0)
+                for run in runs
+                if field == "count"
+                or field in run.get("task_types", {}).get(task_type, {})
+            ]
+            if values:
+                fields[field] = {
+                    "n": len(values),
+                    "mean": statistics.mean(values),
+                    "sd": statistics.stdev(values) if len(values) > 1 else None,
+                    "median": statistics.median(values),
+                    "min": min(values),
+                    "max": max(values),
+                }
+        result[task_type] = fields
     return result

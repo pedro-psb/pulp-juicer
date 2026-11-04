@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from experiments.bucket_repository.experiment import EXPERIMENT
@@ -16,6 +17,12 @@ from pulp_juicer.types import ServiceFixtureMetadata, UnitaryImpulseLoad
 
 
 class TestUploadScenario(unittest.TestCase):
+    def test_scenario_selected_stats_accepts_a_list(self):
+        scenario = EXPERIMENT.scenarios[0]
+        self.assertIn("request_completions", scenario.selected_stats)
+        copied = replace(scenario, selected_stats=["task_dispatches", "trial_phases"])
+        self.assertEqual(copied.selected_stats, ("task_dispatches", "trial_phases"))
+
     def test_repeated_pull_through_uses_the_same_100_resources_ten_times(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

@@ -5,6 +5,7 @@ from pathlib import Path
 
 def experiments():
     from experiments.bucket_repository.experiment import EXPERIMENT
+    from experiments.version_retention.experiment import EXPERIMENT as RETENTION
 
     compose = (
         Path(__file__).resolve().parents[1]
@@ -12,4 +13,8 @@ def experiments():
         / "bucket_repository"
         / "compose.yaml"
     )
-    return {EXPERIMENT.id: (EXPERIMENT, compose)}
+    retention_compose = compose.parent.parent / "version_retention" / "compose.yaml"
+    return {
+        EXPERIMENT.id: (EXPERIMENT, compose),
+        RETENTION.id: (RETENTION, retention_compose),
+    }

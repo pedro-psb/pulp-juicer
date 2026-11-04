@@ -34,6 +34,7 @@ class RunMetadata:
     driver: str
     input_builder: Callable[..., dict]
     result_dir: Path
+    scenario_setup: Callable | None = None
 
 
 @dataclass(frozen=True)
@@ -219,6 +220,7 @@ def build_test_plan(
                     driver=scenario.driver,
                     input_builder=scenario.input,
                     result_dir=result_dir,
+                    scenario_setup=scenario.setup_fn,
                 )
             )
     if not runs:

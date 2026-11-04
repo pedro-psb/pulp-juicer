@@ -2,7 +2,7 @@
 
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -164,6 +164,8 @@ class ScenarioConfig:
     load: LoadProfile
     requires: tuple[RequireFixture, ...] = ()
     draft: bool = False
+    selected_stats: Sequence[str] = ()
+    setup_fn: Callable[..., Mapping[str, Any] | None] | None = None
 
     def __post_init__(self):
         if (
@@ -174,6 +176,13 @@ class ScenarioConfig:
             raise ValueError(
                 "Scenario run_order must be a nonempty tuple of candidate IDs"
             )
+        if not isinstance(self.selected_stats, (tuple, list)) or any(
+            not isinstance(key, str) or not key for key in self.selected_stats
+        ):
+            raise ValueError("Scenario selected_stats must be a list of variable keys")
+        if len(set(self.selected_stats)) != len(self.selected_stats):
+            raise ValueError("Scenario selected_stats must not contain duplicates")
+        object.__setattr__(self, "selected_stats", tuple(self.selected_stats))
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,12 @@
 import math
 import unittest
 
-from pulp_juicer.summary_statistics import distribution, summarize_candidate
+from pulp_juicer.summary_statistics import (
+    distribution,
+    summarize_candidate,
+    summarize_candidate_task_types,
+    summarize_task_types,
+)
 
 
 class TestSummaryStatistics(unittest.TestCase):
@@ -35,6 +40,30 @@ class TestSummaryStatistics(unittest.TestCase):
         self.assertEqual(summary["mean"]["mean"], 20)
         self.assertAlmostEqual(summary["mean"]["sd"], math.sqrt(200))
         self.assertEqual(summary["n"]["mean"], 50.5)
+
+    def test_task_type_counts_and_durations_are_per_run(self):
+        first = summarize_task_types(
+            [
+                {"task_type": "pull", "execution_time_us": 1000},
+                {"task_type": "pull", "execution_time_us": 3000},
+                {"task_type": "sync", "execution_time_us": None},
+            ]
+        )
+        second = summarize_task_types(
+            [{"task_type": "sync", "execution_time_us": 5000}]
+        )
+        self.assertEqual(first["pull"]["count"], 2)
+        self.assertEqual(first["pull"]["duration_mean"], 2)
+        self.assertAlmostEqual(first["pull"]["duration_p95"], 2.9)
+        self.assertEqual(first["pull"]["duration_total"], 4)
+        self.assertNotIn("duration_mean", first["sync"])
+        across = summarize_candidate_task_types(
+            [{"task_types": first}, {"task_types": second}]
+        )
+        self.assertEqual(across["pull"]["count"]["mean"], 1)
+        self.assertEqual(across["pull"]["count"]["n"], 2)
+        self.assertEqual(across["pull"]["duration_mean"]["n"], 1)
+        self.assertEqual(across["pull"]["duration_mean"]["mean"], 2)
 
 
 if __name__ == "__main__":

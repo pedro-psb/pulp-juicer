@@ -14,8 +14,8 @@ setup.json
 .env
 settings/*
 !settings/settings.py
-src/experiments/bucket_repository/settings/*
-!src/experiments/bucket_repository/settings/settings.py
+src/experiments/*/settings/*
+!src/experiments/*/settings/settings.py
 
 # Python tools
 __pycache__/

@@ -70,7 +70,7 @@ def run(
     progress_interval_seconds: float = 5,
 ) -> RunResultMetadata:
     """Execute one run and retain artifacts after all requests complete."""
-    if metadata.driver not in {"http_get", "http_upload"}:
+    if metadata.driver not in {"http_get", "http_upload", "http_post"}:
         raise NotImplementedError(f"Unsupported driver: {metadata.driver}")
 
     output = metadata.result_dir
@@ -211,6 +211,16 @@ def _run_created(
                         )
                     },
                 )
+            elif metadata.driver == "http_post":
+                response_context = self.client.post(
+                    f"{state['base_url']}/{path}",
+                    name=item.get("name", "http_post"),
+                    context={"artifact_path": artifact_path},
+                    catch_response=True,
+                    timeout=state["request_timeout"],
+                    auth=state["auth"],
+                    json=item["json"],
+                )
             else:
                 response_context = self.client.get(
                     f"{state['base_url']}/{path}",
@@ -279,7 +289,9 @@ def _run_created(
             "sha256": item.get("sha256"),
             "wait_seconds": wait_seconds,
             "request_timeout_seconds": state["request_timeout"],
-            "method": "POST" if metadata.driver == "http_upload" else "GET",
+            "method": "POST"
+            if metadata.driver in {"http_upload", "http_post"}
+            else "GET",
             "relative_path": item.get("relative_path"),
             "file_path": item.get("file_path"),
             "repository": item.get("repository"),
@@ -313,7 +325,9 @@ def _run_created(
 
     def count_request(request_type, **kwargs):
         nonlocal completed
-        if request_type == ("POST" if metadata.driver == "http_upload" else "GET"):
+        if request_type == (
+            "POST" if metadata.driver in {"http_upload", "http_post"} else "GET"
+        ):
             completed += 1
             if completed >= expected_requests:
                 gevent.spawn(runner.quit)
@@ -336,7 +350,9 @@ def _run_created(
             response_length,
             **kwargs,
         ):
-            if request_type != ("POST" if metadata.driver == "http_upload" else "GET"):
+            if request_type != (
+                "POST" if metadata.driver in {"http_upload", "http_post"} else "GET"
+            ):
                 return
             request_rows.append(
                 {

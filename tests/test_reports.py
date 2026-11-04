@@ -3,6 +3,8 @@
 import itertools
 import json
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -18,8 +20,10 @@ from click.testing import CliRunner
 
 from pulp_juicer.cli import cli
 from pulp_juicer.collector.task_db import TASK_SCHEMA
-from pulp_juicer.interactive_report import render_interactive_report
+from pulp_juicer.interactive_report import _PAGE, render_interactive_report
 from pulp_juicer.report import completed_runs, prepare_run, render_report
+from pulp_juicer.summary_report import _PAGE as SUMMARY_PAGE
+from pulp_juicer.summary_report import render_summary_report
 from pulp_juicer.trial_report import (
     _mean_sd,
     _median_curve,
@@ -103,6 +107,34 @@ def write_api_samples(run_dir):
 
 
 class TestReportDiscovery(unittest.TestCase):
+    def test_summary_tables_stack_candidates_and_follow_controls(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is unavailable")
+        script = SUMMARY_PAGE.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+        check = subprocess.run(
+            [node, str(Path(__file__).with_name("summary_layout.cjs"))],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_timeline_shortcuts_cycle_runs_after_selector_focus(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is unavailable")
+        script = _PAGE.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+        check = subprocess.run(
+            [node, str(Path(__file__).with_name("interactive_shortcuts.cjs"))],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
+
     def test_squeeze_generates_and_archives_reports_after_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "_juice"
@@ -138,7 +170,10 @@ class TestReportDiscovery(unittest.TestCase):
 
             with (
                 patch("pulp_juicer.cli.execute_test_plan", side_effect=fake_execute),
-                patch("pulp_juicer.cli.render_report", side_effect=fake_render("report.html")),
+                patch(
+                    "pulp_juicer.cli.render_report",
+                    side_effect=fake_render("report.html"),
+                ),
                 patch(
                     "pulp_juicer.cli.render_trial_report",
                     side_effect=fake_render("trials.html"),
@@ -146,6 +181,10 @@ class TestReportDiscovery(unittest.TestCase):
                 patch(
                     "pulp_juicer.cli.render_interactive_report",
                     side_effect=fake_render("interactive.html"),
+                ),
+                patch(
+                    "pulp_juicer.cli.render_summary_report",
+                    side_effect=fake_render("summary.html"),
                 ),
             ):
                 response = CliRunner().invoke(
@@ -162,7 +201,14 @@ class TestReportDiscovery(unittest.TestCase):
                 )
             self.assertEqual(response.exit_code, 0, response.output)
             self.assertEqual(
-                calls, ["execute", "report.html", "trials.html", "interactive.html"]
+                calls,
+                [
+                    "execute",
+                    "report.html",
+                    "trials.html",
+                    "interactive.html",
+                    "summary.html",
+                ],
             )
             self.assertIn("New Reports:", response.output)
             self.assertIn("interactive.html", response.output)
@@ -179,6 +225,7 @@ class TestReportDiscovery(unittest.TestCase):
                         f"{execution_dir.name}/report.html",
                         f"{execution_dir.name}/trials.html",
                         f"{execution_dir.name}/interactive.html",
+                        f"{execution_dir.name}/summary.html",
                         f"{execution_dir.name}/execution.log",
                     }.issubset(bundle.namelist())
                 )
@@ -222,6 +269,7 @@ class TestReportDiscovery(unittest.TestCase):
                                     "status": "completed",
                                     "started_at_utc": start + timedelta(seconds=1),
                                     "finished_at_utc": start + timedelta(seconds=2),
+                                    "execution_time_us": 1_000_000,
                                 }
                             ],
                             schema=TASK_SCHEMA,
@@ -265,8 +313,19 @@ class TestReportDiscovery(unittest.TestCase):
             )
             tasks = data["groups"][0]["metrics"][1]
             self.assertEqual(
-                (tasks["primary"], tasks["secondary"], tasks["secondaryScale"]),
-                ("task_starts", "task_completions", "y"),
+                [trace["key"] for trace in tasks["traces"]],
+                [
+                    "task_waiting_blocked",
+                    "task_waiting_unblocked",
+                    "task_running",
+                    "task_completed",
+                    "task_failed",
+                    "task_canceled",
+                ],
+            )
+            self.assertEqual(
+                [trace["defaultVisible"] for trace in tasks["traces"]],
+                [True, False, True, True, True, True],
             )
             postgres = data["groups"][0]["metrics"][-1]
             self.assertEqual(
@@ -351,9 +410,21 @@ class TestReportDiscovery(unittest.TestCase):
                 scenario["candidates"][0]["runs"][0]["markers"],
                 {"start": 0.0, "end": 1.0},
             )
-            variables = {variable["key"]: variable for variable in data["variables"]}
+            summary_report = render_summary_report(execution)
+            self.assertEqual(summary_report, (execution / "summary.html").resolve())
+            summary_source = summary_report.read_text()
+            summary_payload = re.search(
+                r'<script id="report-data" type="application/json">(.*?)</script>',
+                summary_source,
+                re.DOTALL,
+            ).group(1)
+            summary_data = json.loads(summary_payload)
+            variables = {
+                variable["key"]: variable for variable in summary_data["variables"]
+            }
             self.assertEqual(variables["request_latency"]["unit"], "request")
             self.assertEqual(variables["pg_cpu"]["unit"], "collector interval")
+            scenario = summary_data["scenarios"][0]
             normal = scenario["candidates"][0]
             self.assertEqual(
                 normal["runs"][0]["statistics"]["request_starts"]["total"], 1
@@ -366,22 +437,47 @@ class TestReportDiscovery(unittest.TestCase):
             self.assertEqual(
                 staging_stats["task_status"]["percentages"], {"completed": 100}
             )
+            task_type = scenario["candidates"][1]["runs"][0]["task_types"]["maven.pull"]
+            self.assertEqual(task_type["count"], 1)
+            self.assertEqual(task_type["duration_mean"], 1000)
             self.assertNotIn(
                 "pg_cpu", staging_stats
             )  # Samples precede this input window.
-            self.assertIn("Summary statistics", source)
-            self.assertIn("Across runs", source)
+            self.assertIn("Summary statistics", summary_source)
+            self.assertIn("Across runs", summary_source)
+            self.assertNotIn("Summary statistics", source)
+            self.assertNotIn("statistics", data["scenarios"][0]["candidates"][0])
+            self.assertNotIn(
+                "statistics", data["scenarios"][0]["candidates"][0]["runs"][0]
+            )
             self.assertIn("drawClear: [drawInputWindow", source)
             self.assertIn("draw: [drawMarkers", source)
             self.assertIn("Input ends (all requests completed)", source)
+            self.assertIn("Press a/s/d/f for the next run", source)
             self.assertIn("key: `scenario-${scenarioIndex}`", source)
             self.assertIn('scales: ["x", null]', source)
             self.assertIn('selector.addEventListener("change"', source)
             self.assertIn("uPlot 1.6.32 license", source)
             self.assertNotIn("cdn.jsdelivr.net", source)
+            for page, name in (
+                (source, "interactive.html"),
+                (summary_source, "summary.html"),
+            ):
+                self.assertIn('aria-label="Report pages"', page)
+                self.assertIn(f'href="{name}" aria-current="page"', page)
+                for target in (
+                    "summary.html",
+                    "interactive.html",
+                    "trials.html",
+                    "report.html",
+                ):
+                    self.assertIn(f'href="{target}"', page)
             previous_time = report.stat().st_mtime_ns
             self.assertEqual(render_interactive_report(execution), report)
             self.assertEqual(report.stat().st_mtime_ns, previous_time)
+            summary_time = summary_report.stat().st_mtime_ns
+            self.assertEqual(render_summary_report(execution), summary_report)
+            self.assertEqual(summary_report.stat().st_mtime_ns, summary_time)
 
     def test_individual_timelines_draw_new_requests_as_lines_on_all_charts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -756,11 +852,14 @@ class TestReportDiscovery(unittest.TestCase):
                         str(execution / "report.html"),
                         str(execution / "trials.html"),
                         str(execution / "interactive.html"),
+                        str(execution / "summary.html"),
                     ],
                 )
             for execution in (first, second):
                 document = (execution / "report.qmd").read_text()
                 self.assertIn(execution.name, document)
+                self.assertIn('aria-label="Report pages"', document)
+                self.assertIn('href="report.html" aria-current="page"', document)
                 self.assertIn(
                     f"| {execution.name} | burst | run001 | normal | 2 | 1 |",
                     document,
@@ -889,6 +988,8 @@ class TestReportDiscovery(unittest.TestCase):
             self.assertEqual(report, execution / "trials.html")
             self.assertEqual(quarto.call_count, 1)
             source = (execution / "trials.qmd").read_text()
+            self.assertIn('aria-label="Report pages"', source)
+            self.assertIn('href="trials.html" aria-current="page"', source)
             self.assertIn(
                 "| normal | 2 | 2.00\u00a0±\u00a00.00 | 0.00\u00a0±\u00a00.00 | 0.00\u00a0±\u00a00.00 | 11.00\u00a0±\u00a01.41 |",
                 source,
@@ -1042,7 +1143,7 @@ class TestReportDiscovery(unittest.TestCase):
 
             source_path = execution / "trials.qmd"
             source_path.write_text(
-                source.replace("<!-- pulp-juicer-trial-layout: 28 -->", "")
+                source.replace("<!-- pulp-juicer-trial-layout: 29 -->", "")
             )
             with (
                 patch(
@@ -1055,7 +1156,7 @@ class TestReportDiscovery(unittest.TestCase):
                 self.assertEqual(render_trial_report(execution), report)
             refreshed.assert_called_once()
             self.assertIn(
-                "<!-- pulp-juicer-trial-layout: 28 -->", source_path.read_text()
+                "<!-- pulp-juicer-trial-layout: 29 -->", source_path.read_text()
             )
 
     def test_existing_report_needs_no_quarto(self):

@@ -9,13 +9,26 @@ from pulp_juicer import (
     PreTestFunction,
     RequireFixture,
     ScenarioConfig,
-    sample_sequence,
     StepFunctionLoad,
     UnitaryImpulseLoad,
+    sample_sequence,
 )
 
 from . import candidates, scenario_input
 from .data_service.fixture import MavenServiceFixture
+
+# Variable keys come from summary_statistics.VARIABLES; trial_phases selects a transposed table.
+SELECTED_STATS = (
+    "trial_phases",
+    "request_failure",
+    "request_completions",
+    "request_latency",
+    "task_dispatches",
+    "task_execution",
+    "pg_cpu",
+    "pg_pss",
+    "pg_cpu_seconds",
+)
 
 EXPERIMENT = ExperimentConfig(
     id="bucket-repository",
@@ -79,6 +92,7 @@ EXPERIMENT = ExperimentConfig(
             input=scenario_input.build_pull_through,
             run_order=sample_sequence(n=3, candidates=(1, 2)),
             load=UnitaryImpulseLoad(request_count=1000),
+            selected_stats=SELECTED_STATS,
         ),
         ScenarioConfig(
             id="pull-through-1k-impulse-repeated-requests",
@@ -90,6 +104,7 @@ EXPERIMENT = ExperimentConfig(
             input=scenario_input.build_pull_through_repeated,
             run_order=sample_sequence(n=3, candidates=(1, 2)),
             load=UnitaryImpulseLoad(request_count=1000),
+            selected_stats=SELECTED_STATS,
         ),
         ScenarioConfig(
             id="pull-through-step-30-users",
@@ -104,6 +119,7 @@ EXPERIMENT = ExperimentConfig(
                 steps=(LoadStep(at_seconds=0, users=30),),
                 request_count=650,
             ),
+            selected_stats=SELECTED_STATS,
         ),
         ScenarioConfig(
             id="upload-impulse",
@@ -113,8 +129,9 @@ EXPERIMENT = ExperimentConfig(
                 RequireFixture(name="maven", args={"count": 1000, "size": 65536}),
             ),
             input=scenario_input.build_upload,
-            run_order=sample_sequence(n=3, candidates=(1,2)),
+            run_order=sample_sequence(n=3, candidates=(1, 2)),
             load=UnitaryImpulseLoad(request_count=100),
+            selected_stats=SELECTED_STATS,
         ),
         ScenarioConfig(
             id="tmp",
@@ -130,6 +147,7 @@ EXPERIMENT = ExperimentConfig(
                 steps=(LoadStep(at_seconds=0, users=30),),
                 request_count=120,
             ),
+            selected_stats=SELECTED_STATS,
         ),
     ),
 )

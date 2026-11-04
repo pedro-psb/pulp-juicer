@@ -1,0 +1,20 @@
+ARG BASE_TAG=latest
+FROM pulp/pulp-ci-centos10:${BASE_TAG} AS collector-builder
+COPY src/pulp_juicer/collector /tmp/collector
+RUN --mount=type=cache,id=pulp-juicer-rpm-uv,target=/root/.cache/uv \
+    uv run --no-project --with rpm-rs==0.30.2 \
+      python /tmp/collector/build_rpm.py /tmp/collector
+
+FROM pulp/pulp-ci-centos10:${BASE_TAG}
+COPY --from=collector-builder /tmp/collector/pulp-juicer-collector-0.8.0-1.noarch.rpm /tmp/
+RUN rpm -i /tmp/pulp-juicer-collector-0.8.0-1.noarch.rpm && \
+    rm /tmp/pulp-juicer-collector-0.8.0-1.noarch.rpm
+COPY --from=pulpcore_src / /opt/pulp-sources/pulpcore/
+RUN --mount=type=cache,id=version-retention-uv,target=/root/.cache/uv \
+    UV_LINK_MODE=copy uv pip install --system --refresh-package pulpcore \
+      /opt/pulp-sources/pulpcore pyarrow==26.0.0 psutil==7.2.2 -c /constraints.txt
+COPY src/experiments/version_retention/seed_models.py /opt/seed_models.py
+USER pulp:pulp
+RUN PULP_STATIC_ROOT=/var/lib/operator/static/ PULP_CONTENT_ORIGIN=localhost \
+    /usr/local/bin/pulpcore-manager collectstatic --clear --noinput --link
+USER root:root

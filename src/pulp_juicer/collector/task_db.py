@@ -97,10 +97,12 @@ def write_task_snapshot(
     import psycopg
 
     components = components or PulpComponents()
-    with psycopg.connect(components.database.uri, connect_timeout=5) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(TASK_QUERY)
-            rows = [task_row(record) for record in cursor.fetchall()]
+    with (
+        psycopg.connect(components.database.uri, connect_timeout=5) as connection,
+        connection.cursor() as cursor,
+    ):
+        cursor.execute(TASK_QUERY)
+        rows = [task_row(record) for record in cursor.fetchall()]
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / "tasking.parquet"
     temporary = output.with_suffix(".parquet.tmp")

@@ -252,6 +252,14 @@ def execute_test_plan(
                     )
                     if output is not None:
                         candidate_data.update(output)
+                if run.scenario_setup is not None:
+                    if on_progress:
+                        on_progress(f"Pre-test: seed {run.scenario_id}")
+                    output = run.scenario_setup(
+                        plan.pulp_connection, run.fixtures, candidate_run_id, runtime
+                    )
+                    if output is not None:
+                        candidate_data.update(output)
                 context.update(
                     candidate_data=candidate_data,
                     source_paths=source_paths,
@@ -259,7 +267,7 @@ def execute_test_plan(
                 request_input = run.input_builder(
                     run.fixtures, candidate_data, run.load
                 )
-                if run.driver == "http_upload":
+                if run.driver in {"http_upload", "http_post"}:
                     request_input["auth"] = (
                         plan.pulp_connection.username,
                         plan.pulp_connection.password,

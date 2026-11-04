@@ -45,9 +45,9 @@ __all__ = [
     "VolumeFixture",
     "VolumeFixtureMetadata",
     "build_test_plan",
-    "sample_sequence",
     "execute_test_plan",
     "load_plan_file",
     "run_locust",
+    "sample_sequence",
     "write_plan_file",
 ]

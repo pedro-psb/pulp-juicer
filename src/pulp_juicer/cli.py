@@ -25,6 +25,7 @@ from .plan import build_test_plan, execution_scope, resolve_run_order, resolve_w
 from .plan_file import write_plan_file
 from .report import render_report
 from .sources import public_source
+from .summary_report import render_summary_report
 from .trial_report import render_trial_report
 from .types import PulpConnection
 
@@ -287,12 +288,13 @@ def report_results(execution_id, results_dir, quarto_command, archive_reports):
                 ("report.html", render_report),
                 ("trials.html", render_trial_report),
                 ("interactive.html", render_interactive_report),
+                ("summary.html", render_summary_report),
             ):
                 output = execution_dir / name
                 previous_time = output.stat().st_mtime_ns if output.is_file() else None
                 report = (
                     renderer(execution_dir)
-                    if renderer is render_interactive_report
+                    if renderer in (render_interactive_report, render_summary_report)
                     else renderer(execution_dir, quarto_command)
                 )
                 if report is not None:
@@ -380,6 +382,7 @@ def list_results(experiment_id, workdir):
                 "trials.html",
                 "trials.qmd",
                 "interactive.html",
+                "summary.html",
             ):
                 report_file = execution_dir / name
                 if report_file.is_file():

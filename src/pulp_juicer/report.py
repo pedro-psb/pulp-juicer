@@ -19,9 +19,10 @@ from .collector_metrics import (
     worker_resource_series,
 )
 from .postgres_metrics import read_postgres_samples, summarize_postgres
+from .report_navigation import navigation_html
 from .result_data import graph_path, normalize_execution, normalize_run, read_rows
 
-_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 25 -->"
+_REPORT_LAYOUT_MARKER = "<!-- pulp-juicer-report-layout: 29 -->"
 
 
 def number(row, key, suffix="", digits=1):
@@ -39,14 +40,24 @@ def markdown_value(value):
 def run_configuration(metadata, history):
     fixture = metadata["fixture"]
     load = metadata["load"]
+    setup = metadata.get("setup", {})
+    request_url = setup.get("base_url") or setup.get("api_base_url")
+    request_url_label = "Distribution URL" if setup.get("base_url") else "API URL"
+    has_fixture = bool(fixture.get("count"))
     lines = [
         "### Run configuration",
         "",
         "| Setting | Value |",
         "|:--|:--|",
-        f"| Fixture COUNT (artifacts for candidate) | {fixture['count']} |",
-        f"| Fixture ID requested at setup | {markdown_value(fixture['requested_fixture_id'])} |",
-        f"| Payload bytes requested at setup | {fixture['requested_payload_bytes']} |",
+        *(
+            [
+                f"| Fixture COUNT (artifacts for candidate) | {fixture['count']} |",
+                f"| Fixture ID requested at setup | {markdown_value(fixture['requested_fixture_id'])} |",
+                f"| Payload bytes requested at setup | {fixture['requested_payload_bytes']} |",
+            ]
+            if has_fixture
+            else []
+        ),
         f"| Load profile | {markdown_value(load.get('profile', 'UnitaryImpulseLoad'))} |",
         f"| Concurrent users (configured) | {load['users']} |",
         f"| Peak active users (observed) | {max(int(row['User Count']) for row in history) if history else 'N/A'} |",
@@ -66,14 +77,26 @@ def run_configuration(metadata, history):
         ),
         f"| Maximum duration | {markdown_value(load['duration'])} |",
         f"| Wait between requests | {load['wait_seconds']} s |",
-        f"| Distribution URL | {markdown_value(metadata['setup']['base_url'])} |",
-        f"| Upstream URL | {markdown_value(metadata['upstream_url'])} |",
+        *(
+            [f"| {request_url_label} | {markdown_value(request_url)} |"]
+            if request_url
+            else []
+        ),
+        *(
+            [f"| Upstream URL | {markdown_value(metadata['upstream_url'])} |"]
+            if metadata.get("upstream_url")
+            else []
+        ),
         f"| Docker Compose project | {markdown_value(metadata['project'])} |",
         *[
             f"| Pulp setting {markdown_value(name)} | {markdown_value(value)} |"
             for name, value in sorted(metadata.get("pulp_settings", {}).items())
         ],
-        f"| Fixture SHA256 | {fixture['manifest_sha256']} |",
+        *(
+            [f"| Fixture SHA256 | {fixture['manifest_sha256']} |"]
+            if has_fixture and fixture.get("manifest_sha256")
+            else []
+        ),
         "",
         "#### Software sources",
         "",
@@ -88,7 +111,7 @@ def run_configuration(metadata, history):
             f"{markdown_value(source['revision'])} | {changes} |"
         )
     lines.append("")
-    if fixture["requested_count"] != fixture["count"]:
+    if has_fixture and fixture["requested_count"] != fixture["count"]:
         lines += [
             (
                 f"The fixture already existed at setup: COUNT={fixture['requested_count']} was requested, "
@@ -726,6 +749,10 @@ def render_report(
             not source_text or _REPORT_LAYOUT_MARKER not in source_text
         )
         data_stale = any(path.stat().st_mtime_ns > report_time for path in data_files)
+        data_stale |= (
+            Path(__file__).with_name("report_navigation.py").stat().st_mtime_ns
+            > report_time
+        )
         if not layout_stale and not data_stale:
             return report.resolve()
     runs = list(completed_runs(execution_dir))
@@ -749,6 +776,10 @@ def render_report(
         "---",
         "",
         _REPORT_LAYOUT_MARKER,
+        "",
+        "```{=html}",
+        navigation_html("report.html"),
+        "```",
         "",
         "# Overview",
         "",

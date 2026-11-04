@@ -7,13 +7,13 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from .execution_timing import read_execution_timings
 from .report import completed_runs
+from .report_navigation import navigation_html
 from .result_data import normalize_execution, read_rows
-from .summary_statistics import VARIABLES, summarize_candidate, summarize_run
+from .tasking import TASK_STATES
 from .trial_report import _METRICS, _read_trial
 
-_LAYOUT_MARKER = "<!-- pulp-juicer-interactive-layout: 14 -->"
+_LAYOUT_MARKER = "<!-- pulp-juicer-interactive-layout: 20 -->"
 _ASSETS = Path(__file__).with_name("assets")
 _METRIC_GROUPS = (
     ("Request, Tasks and Postgres activity", ("requests", "tasks", "postgres")),
@@ -74,7 +74,7 @@ def render_interactive_report(execution_dir: Path) -> Path | None:
         )
         inputs = (
             Path(__file__),
-            Path(__file__).with_name("summary_statistics.py"),
+            Path(__file__).with_name("report_navigation.py"),
             *_ASSETS.iterdir(),
             *data_inputs,
         )
@@ -87,14 +87,12 @@ def render_interactive_report(execution_dir: Path) -> Path | None:
         if all(path.stat().st_mtime_ns <= output.stat().st_mtime_ns for path in inputs):
             return output.resolve()
 
-    timings = read_execution_timings(execution_dir)
     scenarios = defaultdict(lambda: defaultdict(list))
     for run_dir in run_dirs:
         trial = _read_trial(run_dir)
         if trial is None:
             continue
         markers = _request_markers(run_dir, trial.metadata)
-        timing = timings.get((trial.scenario, trial.candidate, trial.run_id))
         scenarios[trial.scenario][trial.candidate].append(
             {
                 "run": trial.run_id,
@@ -102,7 +100,6 @@ def render_interactive_report(execution_dir: Path) -> Path | None:
                 "markers": {key: markers[key] for key in ("start", "end")}
                 if markers
                 else None,
-                "statistics": summarize_run(trial, markers, timing),
             }
         )
     if not scenarios:
@@ -124,12 +121,17 @@ def render_interactive_report(execution_dir: Path) -> Path | None:
     metrics["tasks"] = {
         "key": "tasks",
         "title": "Task activity",
-        "axis": "Tasks started/s",
-        "primary": "task_starts",
-        "secondary": "task_completions",
-        "secondaryAxis": "Tasks completed/s",
-        "secondaryScale": "y",
-        "subtitle": "Tasks started/s · tasks completed/s",
+        "axis": "Tasks (count)",
+        "traces": [
+            {
+                "key": f"task_{key}",
+                "label": label,
+                "color": color,
+                "defaultVisible": key != "waiting_unblocked",
+            }
+            for key, label, color in TASK_STATES
+        ],
+        "subtitle": "Task counts by state; select Waiting (unblocked) in the legend to show it",
     }
     metrics["postgres"] = {
         "key": "postgres",
@@ -192,7 +194,6 @@ def render_interactive_report(execution_dir: Path) -> Path | None:
                     {
                         "name": candidate,
                         "runs": sorted(runs, key=lambda run: run["run"]),
-                        "statistics": summarize_candidate(runs),
                     }
                     for candidate, runs in sorted(candidates.items())
                 ],
@@ -202,17 +203,6 @@ def render_interactive_report(execution_dir: Path) -> Path | None:
         "groups": [
             {"title": title, "metrics": [metrics[key] for key in keys]}
             for title, keys in _METRIC_GROUPS
-        ],
-        "variables": [
-            {
-                "group": group,
-                "key": key,
-                "title": title,
-                "unit": unit,
-                "measure": measure,
-                "fields": fields,
-            }
-            for group, key, title, unit, measure, fields in VARIABLES
         ],
     }
     # JSON is embedded in a script tag; escape HTML-sensitive characters in labels.
@@ -225,6 +215,7 @@ def render_interactive_report(execution_dir: Path) -> Path | None:
     title = html.escape(execution_dir.name)
     page = (
         _PAGE.replace("__TITLE__", title)
+        .replace("__NAV__", navigation_html("interactive.html"))
         .replace("__DATA__", payload)
         .replace("__UPLOT_CSS__", (_ASSETS / "uPlot.min.css").read_text())
         .replace("__UPLOT_JS__", (_ASSETS / "uPlot.iife.min.js").read_text())
@@ -263,6 +254,7 @@ _PAGE = """<!doctype html>
   .candidate { padding: 12px 14px; position: sticky; top: 0; z-index: 2; }
   .candidate strong { display: block; margin-bottom: 8px; }
   .candidate select { width: 100%; padding: 6px; }
+  .shortcut-hint { display: block; margin-top: 5px; color: #627189; font-size: .78rem; }
   .group-heading { grid-column: 1 / -1; margin: 14px 0 0; padding: 12px 14px; background: #e8eef7; border-left: 4px solid #8ba4c7; border-radius: 6px; font-size: 1rem; }
   .metric-label strong { display: block; }
   .metric-label small { color: #526178; }
@@ -270,28 +262,14 @@ _PAGE = """<!doctype html>
   .empty { display: grid; place-items: center; height: 210px; color: #69778d; }
   .uplot { margin: auto; }
   .u-legend { font-size: 12px; }
-  .summary-host { margin: 16px 0 24px; }
-  .summary-host h3 { margin: 0 0 8px; }
-  .summary-help { color: #526178; font-size: .88rem; margin: 8px 0 14px; }
-  .summary-controls { display: flex; align-items: center; gap: 10px; }
-  .summary-controls select { padding: 5px; }
-  .summary-group { background: white; border: 1px solid #dde4ef; border-radius: 8px; margin: 8px 0; }
-  .summary-group > summary { cursor: pointer; padding: 10px 14px; font-weight: 650; }
-  .summary-table-wrap { overflow-x: auto; }
-  .summary-table { border-collapse: collapse; width: 100%; min-width: 720px; font-size: .82rem; }
-  .summary-table th, .summary-table td { padding: 8px 10px; border-top: 1px solid #e4e9f1; text-align: left; vertical-align: top; }
-  .summary-table th { background: #f7f9fc; }
-  .summary-table td:first-child { min-width: 145px; }
-  .summary-table td:not(:first-child) { min-width: 250px; }
-  .summary-table small { display: block; color: #627189; }
-  .stat-line { display: block; line-height: 1.5; }
-  .stat-name { color: #526178; }
 </style>
 </head>
 <body>
+__NAV__
 <main>
 <h1>Interactive timelines</h1>
-<p class="intro">Execution: <strong>__TITLE__</strong> · Time is seconds since each run's load start. Choose one run per candidate; hover a chart to see the same time in every chart in that scenario. <a href="report.html">Detailed report</a> · <a href="trials.html">Trial comparison</a></p>
+<p class="intro">Execution: <strong>__TITLE__</strong> · Time is seconds since each run's load start. Choose one run per candidate; hover a chart to see the same time in every chart in that scenario.</p>
+<p class="intro">Press a/s/d/f for the next run in candidate columns 1–4, or Shift+letter for the previous run. Shortcuts cycle each scenario.</p>
 <p class="intro">Blue shows the primary series and orange the second measurement on combined charts. Only Request activity has a dashed gray cumulative completed-requests line on a right axis.</p>
 <p class="marker-legend"><span class="window"><i></i>Input window</span><span class="start"><i></i>Input starts (first request)</span><span class="end"><i></i>Input ends (all requests completed)</span></p>
 <div id="reports"></div>
@@ -310,65 +288,13 @@ __UPLOT_LICENSE__
     return;
   }
   const chartGroups = [];
+  const shortcutKeys = ["a", "s", "d", "f"];
+  const scenarioSelectors = [];
   const make = (tag, className, text) => {
     const element = document.createElement(tag);
     element.className = className;
     if (text !== undefined) element.textContent = text;
     return element;
-  };
-  const number = value => value == null ? "N/A" : Number(value).toLocaleString(undefined, {maximumFractionDigits: 2});
-  const fieldName = {n: "n", mean: "mean", sd: "SD", median: "median", p95: "p95", p99: "p99", max: "max", total: "total", percent: "failure %"};
-  const appendLine = (cell, label, value) => {
-    const line = make("span", "stat-line");
-    line.append(make("span", "stat-name", `${label}: `), document.createTextNode(value));
-    cell.append(line);
-  };
-  const renderStatistics = (host, scenario, selected, mode) => {
-    const openGroups = new Set([...host.querySelectorAll("details[open] > summary")].map(item => item.textContent));
-    const firstDraw = host.childElementCount === 0;
-    host.replaceChildren();
-    const groups = [...new Set(data.variables.map(variable => variable.group))];
-    for (const group of groups) {
-      const details = make("details", "summary-group");
-      if ((firstDraw && group === "Requests") || openGroups.has(group)) details.open = true;
-      details.append(make("summary", "", group));
-      const wrap = make("div", "summary-table-wrap");
-      const table = make("table", "summary-table");
-      const head = make("tr", "");
-      head.append(make("th", "", "Variable / observation"));
-      scenario.candidates.forEach(candidate => head.append(make("th", "", candidate.name)));
-      table.append(head);
-      for (const variable of data.variables.filter(item => item.group === group)) {
-        const row = make("tr", "");
-        const label = make("td", "");
-        label.append(make("strong", "", variable.title), make("small", "", `${variable.unit} · ${variable.measure}`));
-        row.append(label);
-        scenario.candidates.forEach((candidate, index) => {
-          const cell = make("td", "");
-          const summary = mode === "run" ? candidate.runs[selected[index]].statistics[variable.key] : candidate.statistics[variable.key];
-          if (!summary) {
-            cell.textContent = "N/A";
-          } else if (summary.counts) {
-            for (const [category, value] of Object.entries(summary.counts)) {
-              appendLine(cell, category, mode === "run" ? `${number(value)} (${number(summary.percentages[category])}%)` : `${number(value.mean)} ± ${number(value.sd)}; mean ${number(value.percent_mean)}%; median ${number(value.median)}; ${number(value.min)}–${number(value.max)}; runs ${value.n}`);
-            }
-          } else {
-            for (const field of variable.fields) {
-              const value = summary[field];
-              if (value == null) continue;
-              const unit = variable.measure.endsWith("/s") ? variable.measure.slice(0, -2) : variable.measure;
-              const label = field === "total" ? `total (${unit})` : fieldName[field] || field;
-              appendLine(cell, label, mode === "run" ? `${number(value)}${field === "percent" ? "%" : ""}` : `${number(value.mean)} ± ${number(value.sd)}; median ${number(value.median)}; ${number(value.min)}–${number(value.max)}; runs ${value.n}`);
-            }
-          }
-          row.append(cell);
-        });
-        table.append(row);
-      }
-      wrap.append(table);
-      details.append(wrap);
-      host.append(details);
-    }
   };
   const drawInputWindow = markers => plot => {
     if (!markers || markers.end <= markers.start) return;
@@ -406,20 +332,6 @@ __UPLOT_LICENSE__
   data.scenarios.forEach((scenario, scenarioIndex) => {
     const section = make("section", "");
     section.append(make("h2", "", scenario.name));
-    const summaryHost = make("div", "summary-host");
-    const summaryControls = make("div", "summary-controls");
-    summaryControls.append(make("h3", "", "Summary statistics"));
-    const summaryMode = make("select", "");
-    summaryMode.setAttribute("aria-label", `${scenario.name}: summary level`);
-    for (const [value, label] of [["run", "Selected run"], ["candidate", "Across runs"]]) {
-      const option = make("option", "", label);
-      option.value = value;
-      summaryMode.append(option);
-    }
-    summaryControls.append(summaryMode);
-    section.append(summaryControls);
-    section.append(make("p", "summary-help", "Within a run: request and task events use population SD and interpolated percentiles. Collector values are weighted by observed time in the input window; their percentiles describe time occupancy. Task events include drain time. Across runs: each run contributes equally; SD is sample SD (N/A for one run). Missing measurements are excluded. Rate totals are integrated over observed intervals."));
-    section.append(summaryHost);
     const scroll = make("div", "scroll");
     const matrix = make("div", "matrix");
     matrix.style.gridTemplateColumns = `180px repeat(${scenario.candidates.length}, minmax(460px, 1fr))`;
@@ -428,7 +340,7 @@ __UPLOT_LICENSE__
     root.append(section);
     matrix.append(make("div", "corner", "Measurement"));
     const selected = scenario.candidates.map(() => 0);
-    summaryMode.addEventListener("change", () => renderStatistics(summaryHost, scenario, selected, summaryMode.value));
+    const selectors = [];
     const chartRows = [];
     const plots = [];
     for (const [index, candidate] of scenario.candidates.entries()) {
@@ -446,6 +358,11 @@ __UPLOT_LICENSE__
         draw();
       });
       header.append(selector);
+      if (index < shortcutKeys.length) {
+        const key = shortcutKeys[index];
+        header.append(make("small", "shortcut-hint", `${key} next · ${key.toUpperCase()} previous`));
+      }
+      selectors.push(selector);
       matrix.append(header);
     }
     for (const group of data.groups) {
@@ -465,7 +382,6 @@ __UPLOT_LICENSE__
       }
     }
     function draw() {
-      renderStatistics(summaryHost, scenario, selected, summaryMode.value);
       plots.forEach(plot => plot.destroy());
       plots.length = 0;
       chartRows.flatMap(row => row.cells).forEach(cell => cell.replaceChildren());
@@ -486,6 +402,45 @@ __UPLOT_LICENSE__
       minX -= padding;
       maxX += padding;
       for (const {metric, cells} of chartRows) {
+        if (metric.traces) {
+          const traceRows = runs.map(run => metric.traces.map(trace => run.series[trace.key] || []));
+          let maxY = 1;
+          for (const candidate of traceRows) for (const points of candidate) {
+            for (const [, y] of points) maxY = Math.max(maxY, y);
+          }
+          maxY *= 1.05;
+          traceRows.forEach((candidate, candidateIndex) => {
+            const cell = cells[candidateIndex];
+            if (!candidate.some(points => points.length)) {
+              cell.append(make("div", "empty", "No samples for this run"));
+              return;
+            }
+            const tables = candidate.map(points => [points.map(point => point[0]), points.map(point => point[1])]);
+            const aligned = uPlot.join(tables);
+            const series = [
+              {label: "Seconds"},
+              ...metric.traces.map(trace => ({
+                label: trace.label, stroke: trace.color, width: 2,
+                show: trace.defaultVisible !== false,
+                spanGaps: true, points: {show: false},
+              })),
+            ];
+            plots.push(new uPlot({
+              width: Math.max(420, cell.clientWidth - 12), height: 280,
+              scales: {x: {time: false, range: [minX, maxX]}, y: {range: [0, maxY]}},
+              series, axes: [{label: "Seconds"}, {size: 52, label: metric.axis}],
+              cursor: {
+                drag: {x: false, y: false},
+                sync: {key: `scenario-${scenarioIndex}`, scales: ["x", null], setSeries: false},
+              },
+              hooks: {
+                drawClear: [drawInputWindow(runs[candidateIndex].markers)],
+                draw: [drawMarkers(runs[candidateIndex].markers)],
+              },
+            }, aligned, cell));
+          });
+          continue;
+        }
         let maxCompleted = 1;
         if (metric.key === "requests") {
           for (const run of runs) for (const [, count] of run.series.completed || []) {
@@ -557,8 +512,26 @@ __UPLOT_LICENSE__
       }
     }
     draw();
-    chartGroups.push({plots, cells});
+    scenarioSelectors.push(selectors);
+    chartGroups.push({plots});
   });
+  window.addEventListener("keydown", event => {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.repeat) return;
+    const target = event.target;
+    if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA"].includes(target.tagName))) return;
+    const index = shortcutKeys.indexOf(event.key.toLowerCase());
+    if (index < 0) return;
+    const direction = event.key === event.key.toUpperCase() ? -1 : 1;
+    let changed = false;
+    for (const selectors of scenarioSelectors) {
+      const selector = selectors[index];
+      if (!selector || selector.options.length < 2) continue;
+      selector.selectedIndex = (selector.selectedIndex + direction + selector.options.length) % selector.options.length;
+      selector.dispatchEvent(new Event("change"));
+      changed = true;
+    }
+    if (changed) event.preventDefault();
+  }, true);
   let resizeTimer;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);

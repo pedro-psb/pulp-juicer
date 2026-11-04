@@ -117,11 +117,13 @@ class TestCollectors(unittest.TestCase):
         sampler = SimpleNamespace(
             sample=MagicMock(return_value={"processes": 0, "cpu_seconds": None})
         )
-        with patch(
-            "pulp_juicer.collector.postgres_wait.time.monotonic", side_effect=[0, 2]
+        with (
+            patch(
+                "pulp_juicer.collector.postgres_wait.time.monotonic", side_effect=[0, 2]
+            ),
+            self.assertRaisesRegex(TimeoutError, "did not become idle"),
         ):
-            with self.assertRaisesRegex(TimeoutError, "did not become idle"):
-                wait_for_postgres_idle(1, sampler)
+            wait_for_postgres_idle(1, sampler)
 
     def test_task_wait_polls_active_states_until_cleared(self):
         components = SimpleNamespace(database=SimpleNamespace(uri="postgresql:///pulp"))

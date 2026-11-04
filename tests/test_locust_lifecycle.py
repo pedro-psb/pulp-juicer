@@ -10,8 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pyarrow.parquet as pq
 import gevent
+import pyarrow.parquet as pq
 from locust import User, task
 from locust.env import Environment
 from locust.event import Events

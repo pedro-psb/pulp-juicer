@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pyarrow.parquet as pq
-from locust.clients import HttpSession
 import requests
+from locust.clients import HttpSession
 
 from pulp_juicer.locust_driver import run
 from pulp_juicer.plan import RunMetadata

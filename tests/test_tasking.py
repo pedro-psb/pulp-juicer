@@ -13,7 +13,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from pulp_juicer.collector.task_db import TASK_SCHEMA, task_row, write_task_snapshot
-from pulp_juicer.tasking import task_report_sections, wait_distribution_chart
+from pulp_juicer.tasking import (
+    TASK_STATES,
+    task_report_sections,
+    task_state_series,
+    wait_distribution_chart,
+)
 
 
 class TestTasking(unittest.TestCase):
@@ -151,20 +156,86 @@ class TestTasking(unittest.TestCase):
             ET.parse(run_dir / "graphs" / "report_task_unblock.svg")
             ET.parse(run_dir / "graphs" / "report_task_ready_wait.svg")
             self.assertIn("report_tasks.svg", "\n".join(timeline))
-            self.assertIn("dispatched, started, and completed", "\n".join(timeline))
+            self.assertIn("task state counts", "\n".join(timeline))
             task_chart = ET.parse(run_dir / "graphs" / "report_tasks.svg")
             series = {
                 line.attrib["data-series"]: line.attrib["points"]
                 for line in task_chart.iter("{http://www.w3.org/2000/svg}polyline")
             }
-            self.assertEqual(set(series), {"Dispatched", "Started", "Completed"})
-            dispatch_y = float(series["Dispatched"].split()[0].split(",")[1])
-            start_y = float(series["Started"].split()[0].split(",")[1])
-            self.assertLess(dispatch_y, start_y)
+            self.assertEqual(
+                set(series),
+                {label for key, label, _ in TASK_STATES if key != "waiting_unblocked"},
+            )
+            self.assertIn(
+                "Tasks (count)", (run_dir / "graphs" / "report_tasks.svg").read_text()
+            )
             self.assertEqual(
                 (run_dir / "compose.log").read_text(),
                 "not task syntax; kept for debugging\n",
             )
+
+    def test_task_state_series_tracks_waiting_phases_and_terminal_states(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [
+            {
+                "created_at_utc": start,
+                "unblocked_at_utc": start + timedelta(seconds=1),
+                "started_at_utc": start + timedelta(seconds=2),
+                "finished_at_utc": start + timedelta(seconds=3),
+                "status": "completed",
+            },
+            {
+                "created_at_utc": start,
+                "unblocked_at_utc": None,
+                "started_at_utc": None,
+                "finished_at_utc": None,
+                "status": "waiting",
+            },
+        ]
+        series = task_state_series(rows, start)
+        self.assertEqual([y for _, y in series["waiting_blocked"]], [2, 1, 1, 1])
+        self.assertEqual([y for _, y in series["waiting_unblocked"]], [0, 1, 0, 0])
+        self.assertEqual([y for _, y in series["running"]], [0, 0, 1, 0])
+        self.assertEqual([y for _, y in series["completed"]], [0, 0, 0, 1])
+
+    def test_short_unblocked_wait_occupies_one_display_second(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        series = task_state_series(
+            [
+                {
+                    "created_at_utc": start,
+                    "unblocked_at_utc": start + timedelta(milliseconds=100),
+                    "started_at_utc": start + timedelta(milliseconds=150),
+                    "finished_at_utc": start + timedelta(milliseconds=200),
+                    "status": "completed",
+                }
+            ],
+            start,
+        )
+        self.assertEqual(series["waiting_unblocked"], [(0, 1), (1, 0)])
+        self.assertEqual(series["completed"], [(0, 0), (1, 1)])
+        self.assertEqual(
+            [sum(points[index][1] for points in series.values()) for index in range(2)],
+            [1, 1],
+        )
+
+    def test_canceling_is_not_a_chart_series(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        series = task_state_series(
+            [
+                {
+                    "created_at_utc": start,
+                    "unblocked_at_utc": None,
+                    "started_at_utc": start + timedelta(seconds=1),
+                    "finished_at_utc": None,
+                    "status": "canceling",
+                }
+            ],
+            start,
+        )
+        self.assertEqual(series["running"], [(0, 0), (1, 1)])
+        self.assertNotIn("canceling", series)
+        self.assertNotIn("other", series)
 
     def test_wait_histogram_keeps_shared_bucket_boundaries(self):
         with tempfile.TemporaryDirectory() as tmp:

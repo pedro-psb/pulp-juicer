@@ -8,9 +8,9 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from .result_data import graph_path
-
 import pyarrow.parquet as pq
+
+from .result_data import graph_path
 
 
 def task_metrics(rows: list[dict]) -> dict:
@@ -51,6 +51,89 @@ def task_metrics(rows: list[dict]) -> dict:
         "ready_count": len(ready),
         "median_ready_ms": statistics.median(ready) if ready else None,
     }
+
+
+TASK_STATES = (
+    ("waiting_blocked", "Waiting (blocked)", "#d97706"),
+    ("waiting_unblocked", "Waiting (unblocked)", "#e56b35"),
+    ("running", "Running", "#2563eb"),
+    ("completed", "Completed", "#16a34a"),
+    ("failed", "Failed", "#dc2626"),
+    ("canceled", "Canceled", "#a855f7"),
+)
+
+
+def task_state_series(rows: list[dict], origin: datetime | None = None) -> dict:
+    """Reconstruct task occupancy, showing each unblocked wait for at least one bin."""
+    events = defaultdict(Counter)
+    times = [
+        row[field]
+        for row in rows
+        for field in (
+            "created_at_utc",
+            "unblocked_at_utc",
+            "started_at_utc",
+            "finished_at_utc",
+        )
+        if row.get(field)
+    ]
+    if not times:
+        return {}
+    origin = origin or min(times)
+    for row in rows:
+        created = (
+            row.get("created_at_utc")
+            or row.get("started_at_utc")
+            or row.get("finished_at_utc")
+        )
+        if not created:
+            continue
+
+        def second(timestamp):
+            return (
+                math.floor((timestamp - origin).total_seconds()) if timestamp else None
+            )
+
+        def change(display_second, state, amount):
+            events[display_second][state] += amount
+
+        state = "waiting_blocked"
+        change(second(created), state, 1)
+        unblocked = row.get("unblocked_at_utc")
+        started = row.get("started_at_utc")
+        finished = row.get("finished_at_utc")
+        unblocked_second = second(unblocked)
+        started_second = second(started)
+        finished_second = second(finished)
+        if unblocked_second is not None and started_second is not None:
+            started_second = max(started_second, unblocked_second + 1)
+        if finished_second is not None:
+            if unblocked_second is not None:
+                finished_second = max(finished_second, unblocked_second + 1)
+            if started_second is not None:
+                finished_second = max(finished_second, started_second)
+        terminal = row.get("status")
+        if terminal not in {"completed", "failed", "canceled"}:
+            terminal = None
+        for display_second, next_state in (
+            (unblocked_second, "waiting_unblocked"),
+            (started_second, "running"),
+            (finished_second, terminal),
+        ):
+            if display_second is not None:
+                change(display_second, state, -1)
+                if next_state is not None:
+                    change(display_second, next_state, 1)
+                state = next_state
+    first = min(0, *events)
+    last = max(1, *events)
+    counts = Counter()
+    result = {key: [] for key, _, _ in TASK_STATES}
+    for second in range(first, last + 1):
+        counts.update(events[second])
+        for key, points in result.items():
+            points.append((second, counts[key]))
+    return result
 
 
 def wait_distribution_chart(
@@ -162,32 +245,17 @@ def wait_distribution_chart(
 
 
 def _task_chart(path: Path, rows: list[dict], load_start: datetime | None) -> bool:
-    dispatched = [row["created_at_utc"] for row in rows if row["created_at_utc"]]
-    started = [row["started_at_utc"] for row in rows if row["started_at_utc"]]
-    completed = [
-        row["finished_at_utc"]
-        for row in rows
-        if row["status"] == "completed" and row["finished_at_utc"]
-    ]
-    events = [*dispatched, *started, *completed]
-    if not events:
+    series = task_state_series(rows, load_start)
+    if not series:
         return False
-    origin = load_start or min(events)
-    dispatch_counts = Counter(
-        math.floor((event - origin).total_seconds()) for event in dispatched
-    )
-    start_counts = Counter(
-        math.floor((event - origin).total_seconds()) for event in started
-    )
-    complete_counts = Counter(
-        math.floor((event - origin).total_seconds()) for event in completed
-    )
-    first = min(0, *dispatch_counts, *start_counts, *complete_counts)
-    last = max(1, *dispatch_counts, *start_counts, *complete_counts)
+    first = series["waiting_blocked"][0][0]
+    last = series["waiting_blocked"][-1][0]
+    visible_states = [state for state in TASK_STATES if state[0] != "waiting_unblocked"]
     maximum = max(
-        1, *dispatch_counts.values(), *start_counts.values(), *complete_counts.values()
+        1,
+        *(count for key, _, _ in visible_states for _, count in series[key]),
     )
-    width, height = 900, 365
+    width, height = 900, 390
     left, right, top, bottom = 72, 22, 30, 290
     plot_width = width - left - right
     plot_height = bottom - top
@@ -201,7 +269,7 @@ def _task_chart(path: Path, rows: list[dict], load_start: datetime | None) -> bo
     parts = [
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-            'role="img" aria-label="Pulp tasks dispatched, started, and completed per second">'
+            'role="img" aria-label="Pulp task state counts over time">'
         ),
         '<rect width="100%" height="100%" fill="#fff"/>',
     ]
@@ -215,21 +283,20 @@ def _task_chart(path: Path, rows: list[dict], load_start: datetime | None) -> bo
             f'<text x="{left - 7}" y="{y + 4:.1f}" text-anchor="end">{count:.0f}</text>',
             f'<text x="{x:.1f}" y="{bottom + 20}" text-anchor="middle">{second:.0f}</text>',
         ]
-    for name, counts, color, legend_x in (
-        ("Dispatched", dispatch_counts, "#d97706", left),
-        ("Started", start_counts, "#2563eb", left + 160),
-        ("Completed", complete_counts, "#16a34a", left + 320),
-    ):
+    for index, (key, name, color) in enumerate(visible_states):
+        counts = dict(series[key])
         points = " ".join(
             f"{x:.1f},{y:.1f}"
             for x, y in (
                 xy(second, counts[second]) for second in range(first, last + 1)
             )
         )
+        legend_x = left + (index % 3) * 270
+        legend_y = 320 + (index // 3) * 24
         parts += [
             f'<polyline data-series="{name}" points="{points}" fill="none" stroke="{color}" stroke-width="2.5"/>',
-            f'<line x1="{legend_x}" y1="18" x2="{legend_x + 25}" y2="18" stroke="{color}" stroke-width="3"/>',
-            f'<text x="{legend_x + 32}" y="22">{name}</text>',
+            f'<line x1="{legend_x}" y1="{legend_y}" x2="{legend_x + 25}" y2="{legend_y}" stroke="{color}" stroke-width="3"/>',
+            f'<text x="{legend_x + 32}" y="{legend_y + 4}">{name}</text>',
         ]
     parts += [
         f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#94a3b8"/>',
@@ -244,7 +311,7 @@ def _task_chart(path: Path, rows: list[dict], load_start: datetime | None) -> bo
         (
             f'<text x="18" y="{(top + bottom) / 2}" '
             f'transform="rotate(-90 18 {(top + bottom) / 2})" text-anchor="middle">'
-            "Tasks per second</text>"
+            "Tasks (count)</text>"
         ),
         "</svg>",
     ]
@@ -390,7 +457,9 @@ def task_report_sections(
         timeline = [
             "#### Pulp tasks",
             "",
-            f"![Pulp tasks dispatched, started, and completed per second]({asset}/graphs/report_tasks.svg)",
+            "Lines show task counts by state at the end of each second. An unblocked wait shorter than one second occupies one display bin; later transitions move forward to keep states in order. Waiting (unblocked) is available in the interactive timeline, hidden by default.",
+            "",
+            f"![Pulp task state counts over time]({asset}/graphs/report_tasks.svg)",
             "",
         ]
     return lines, distribution, timeline
