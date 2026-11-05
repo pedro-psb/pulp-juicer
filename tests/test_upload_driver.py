@@ -7,9 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from locust.clients import HttpSession
 import pyarrow.parquet as pq
 import requests
-from locust.clients import HttpSession
 
 from pulp_juicer.locust_driver import run
 from pulp_juicer.plan import RunMetadata
@@ -17,16 +17,18 @@ from pulp_juicer.types import UnitaryImpulseLoad
 
 
 class TestUploadDriver(unittest.TestCase):
-    def test_staging_upload_sends_repository_without_modify(self):
+    def test_staging_upload_commits_after_upload(self):
         sent = []
 
         def send(_session, method, url, **kwargs):
-            sent.append((method, url, kwargs["data"]))
+            sent.append((method, url, kwargs))
             response = requests.Response()
-            response.status_code = 201
+            response.status_code = 202 if "staging/?action=commit" in url else 201
             response.url = url
             response._content = (
-                b'{"pulp_href":"/pulp/api/v3/content/maven/artifact/456/"}'
+                b"{}"
+                if response.status_code == 202
+                else b'{"pulp_href":"/pulp/api/v3/content/maven/artifact/456/"}'
             )
             return response
 
@@ -53,6 +55,7 @@ class TestUploadDriver(unittest.TestCase):
                         "base_url": "http://example.test",
                         "auth": ("admin", "secret"),
                         "modify_repository": None,
+                        "commit_staging_repository": "/pulp/api/v3/repositories/maven/maven/123/",
                         "requests": [
                             {
                                 "path": "pulp/api/v3/content/maven/artifact/upload/",
@@ -65,15 +68,26 @@ class TestUploadDriver(unittest.TestCase):
                     },
                     lambda: None,
                 )
-            self.assertEqual(result.expected_requests, 1)
-            self.assertEqual(result.completed_requests, 1)
+            self.assertEqual(result.expected_requests, 2)
+            self.assertEqual(result.completed_requests, 2)
             self.assertEqual(result.failures, 0)
-        self.assertEqual(len(sent), 1)
+            rows = pq.read_table(metadata.result_dir / "data_load.parquet").to_pylist()
+            self.assertEqual(
+                [row["name"] for row in rows],
+                ["http_upload", "maven-commit-staging"],
+            )
+        self.assertEqual(len(sent), 2)
         self.assertEqual(sent[0][0], "POST")
         self.assertEqual(
-            sent[0][2]["repository"],
+            sent[0][2]["data"]["repository"],
             "/pulp/api/v3/repositories/maven/maven/123/",
         )
+        self.assertEqual(
+            sent[1][1],
+            "http://example.test/pulp/api/v3/repositories/maven/maven/123/staging/?action=commit",
+        )
+        self.assertIsNone(sent[1][2]["data"])
+        self.assertIsNone(sent[1][2]["json"])
 
     def test_upload_through_locust_without_network(self):
         prepared_requests = []

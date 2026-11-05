@@ -521,9 +521,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(candidate_listing.exit_code, 0, candidate_listing.output)
             self.assertIn("Sources:", candidate_listing.output)
             self.assertIn("Settings:", candidate_listing.output)
-            self.assertIn(
-                "STAGING_AUTOCOMMIT_DELAY_SECONDS: 10", candidate_listing.output
-            )
+            self.assertIn("Default Pulp settings", candidate_listing.output)
             self.assertIn("\n\nUse pulp-juicer squeeze", candidate_listing.output)
             self.assertFalse(workdir.exists())
             numeric_candidate = runner.invoke(cli, [*command, "burst", "2"])

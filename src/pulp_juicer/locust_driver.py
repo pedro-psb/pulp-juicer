@@ -130,12 +130,22 @@ def _run_created(
     ):
         raise ValueError("Impulse request count must match the generated request list")
     modify_repository = request_input.get("modify_repository")
-    if modify_repository and metadata.driver != "http_upload":
-        raise ValueError("Repository modify requires HTTP uploads")
-    modify_path = (
-        f"{modify_repository.strip('/')}/modify/" if modify_repository else None
+    commit_staging_repository = request_input.get("commit_staging_repository")
+    if modify_repository and commit_staging_repository:
+        raise ValueError("Only one repository finalization action is allowed")
+    if (
+        modify_repository or commit_staging_repository
+    ) and metadata.driver != "http_upload":
+        raise ValueError("Repository finalization requires HTTP uploads")
+    final_repository = modify_repository or commit_staging_repository
+    final_path = (
+        f"{final_repository.strip('/')}/"
+        f"{'modify/' if modify_repository else 'staging/?action=commit'}"
+        if final_repository
+        else None
     )
-    expected_requests = len(requests) + bool(modify_repository)
+    final_name = "maven-modify" if modify_repository else "maven-commit-staging"
+    expected_requests = len(requests) + bool(final_path)
     wait_seconds = float(request_input.get("wait_seconds", metadata.load.wait_seconds))
     state = {
         "base_url": base_url,
@@ -251,24 +261,31 @@ def _run_created(
                     response.failure(f"SHA256 mismatch: {artifact_path}")
             if metadata.driver == "http_upload":
                 uploads_finished += 1
-                if modify_path and uploads_finished == len(requests):
+                if final_path and uploads_finished == len(requests):
+                    final_kwargs = (
+                        {
+                            "json": {
+                                "add_content_units": [
+                                    href for href in uploaded_hrefs if href is not None
+                                ]
+                            }
+                        }
+                        if modify_repository
+                        else {}
+                    )
                     with self.client.post(
-                        f"{state['base_url']}/{modify_path}",
-                        name="maven-modify",
-                        context={"artifact_path": modify_repository},
+                        f"{state['base_url']}/{final_path}",
+                        name=final_name,
+                        context={"artifact_path": final_repository},
                         catch_response=True,
                         timeout=state["request_timeout"],
                         auth=state["auth"],
-                        json={
-                            "add_content_units": [
-                                href for href in uploaded_hrefs if href is not None
-                            ]
-                        },
+                        **final_kwargs,
                     ) as response:
                         if response.status_code != 202:
                             response.failure(
                                 f"HTTP {response.status_code}, expected 202: "
-                                f"{modify_path}"
+                                f"{final_path}"
                             )
             if isinstance(metadata.load, UnitaryImpulseLoad):
                 raise StopUser()
@@ -298,17 +315,17 @@ def _run_created(
         }
         for item in requests
     ]
-    if modify_path:
+    if final_path:
         data_rows.append(
             {
-                "path": modify_path,
-                "url": f"{base_url}/{modify_path}",
-                "name": "maven-modify",
+                "path": final_path,
+                "url": f"{base_url}/{final_path}",
+                "name": final_name,
                 "expected_status": 202,
                 "wait_seconds": wait_seconds,
                 "request_timeout_seconds": state["request_timeout"],
                 "method": "POST",
-                "repository": modify_repository,
+                "repository": final_repository,
             }
         )
     pq.write_table(

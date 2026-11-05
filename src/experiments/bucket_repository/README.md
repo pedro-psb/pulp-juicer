@@ -6,14 +6,14 @@ Each scenario uses its own `request_count`, which may be less than the fixture c
 Each candidate has a short description shown by `pulp-juicer show bucket-repository`.
 `UnitaryImpulseLoad(request_count=N)` starts N users, each making one request. `StepFunctionLoad` changes the target user count at each `LoadStep(at_seconds, users)` and derives a spawn rate for each change. Burst and temporary scenarios currently have one step, preserving their user targets and request counts. Duration, waits, and timeouts use profile defaults.
 The burst scenario samples normal and staging according to its configured sequence. `pull-through-1k-impulse` combines the former calibrate and short-impulse scenarios; use `-s N` to choose N samples per candidate. `pull-through-1k-impulse-repeated-requests` sends ten copies of the same ordered list of 100 Maven artifacts (1,000 requests total). The request list is repeated; the impulse starts the users together, so completion order is not guaranteed. `tmp` is a draft and is excluded from whole-experiment executions. Pulp volumes are reset before every measurement; generated fixture data remains on disk.
-The `upload-impulse` scenario reuses those JAR files for 100 concurrent multipart POSTs to Maven's synchronous upload endpoint. Each request includes a unique `relative_path`. Staging uploads include the repository so Pulp stages each content unit; normal uploads collect the returned content HREFs and end with one repository modify request that adds them all. HTTP Basic credentials are supplied only at execution time.
+The `upload-impulse` scenario reuses those JAR files for 100 concurrent multipart POSTs to Maven's synchronous upload endpoint. Each request includes a unique `relative_path`. Staging uploads include the repository so Pulp stages each content unit, then issue one explicit staging commit after all uploads. Normal uploads collect the returned content HREFs and end with one repository modify request that adds them all. HTTP Basic credentials are supplied only at execution time.
 
 ## Candidate sources
 
 The experiment requires `pulpcore` and `pulp_maven`; every candidate supplies a source for each.
 A relative source uses the repository root, so `../pulpcore` and `../pulp_maven` select sibling checkouts.
 A Git URL selects a remote ref; the normal candidate uses `pulp/pulp_maven` at tag `0.37.0`.
-The staging candidate supplies its autocommit delay and scan interval as `pulp_settings`; the normal candidate uses Pulp's defaults.
+The staging candidate creates its repository with `staging_autocommit=false`; the normal candidate uses Pulp's defaults.
 Infrastructure resolves each source, installs it, and starts Pulp before invoking candidate setup.
 
 ## Files

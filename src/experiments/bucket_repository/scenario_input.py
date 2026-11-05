@@ -93,6 +93,9 @@ def build_upload(
         "modify_repository": (
             None if candidate["staging_enabled"] else candidate["repository"]
         ),
+        "commit_staging_repository": (
+            candidate["repository"] if candidate["staging_enabled"] else None
+        ),
         "requests": [
             {
                 "path": "pulp/api/v3/content/maven/artifact/upload/",

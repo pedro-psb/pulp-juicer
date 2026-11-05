@@ -74,5 +74,5 @@ def setup_staging(
         connection,
         fixtures,
         run_id,
-        {"staging_enabled": True, "staging_autocommit": True},
+        {"staging_enabled": True, "staging_autocommit": False},
     )

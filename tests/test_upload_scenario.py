@@ -148,7 +148,12 @@ class TestUploadScenario(unittest.TestCase):
             result["modify_repository"],
             "/pulp/api/v3/repositories/maven/maven/123/",
         )
+        self.assertIsNone(result["commit_staging_repository"])
         self.assertIsNone(staging_result["modify_repository"])
+        self.assertEqual(
+            staging_result["commit_staging_repository"],
+            "/pulp/api/v3/repositories/maven/maven/123/",
+        )
         self.assertEqual(
             {request["repository"] for request in staging_result["requests"]},
             {"/pulp/api/v3/repositories/maven/maven/123/"},
