@@ -118,7 +118,7 @@ def _list_scenarios(experiment, selected=None):
         _print_styled("    ", scenario.description)
 
 
-def _show_candidate(experiment, candidate):
+def _show_candidate(experiment, scenario, candidate):
     _print_styled(("Candidate:", "bold magenta"))
     _print_styled("  ", (candidate.name, "cyan"), " — ", candidate.description)
     _print_styled(("Sources:", "bold magenta"))
@@ -127,11 +127,16 @@ def _show_candidate(experiment, candidate):
             "  ", (name, "green"), ": ", public_source(candidate.sources[name])
         )
     _print_styled(("Settings:", "bold magenta"))
-    if candidate.pulp_settings:
-        for name, value in candidate.pulp_settings.items():
+    prepare = scenario.candidate_config.get(candidate.name)
+    settings = prepare.settings if prepare else candidate.pulp_settings
+    if settings:
+        for name, value in settings.items():
             _print_styled("  ", (name, "green"), ": ", value)
     else:
         click.echo("  Default Pulp settings")
+    if prepare:
+        _print_styled(("Preparation:", "bold magenta"))
+        _print_styled("  ", prepare.description)
 
 
 def _print_post_debug_commands(plan, *, maybe_running=False):
@@ -673,7 +678,9 @@ def squeeze(
                 + " --run [-s N]"
             )
         else:
-            _show_candidate(experiment, candidates[candidate_name])
+            _show_candidate(
+                experiment, scenarios[scenario_id], candidates[candidate_name]
+            )
             instruction = f"pulp-juicer squeeze {experiment_id} {scenario_id} {candidate_name} --run"
         click.echo(f"\nUse {instruction} to execute.")
         return

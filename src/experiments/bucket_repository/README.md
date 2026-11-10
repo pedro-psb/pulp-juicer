@@ -7,13 +7,14 @@ Each candidate has a short description shown by `pulp-juicer show bucket-reposit
 `UnitaryImpulseLoad(request_count=N)` starts N users, each making one request. `StepFunctionLoad` changes the target user count at each `LoadStep(at_seconds, users)` and derives a spawn rate for each change. Burst and temporary scenarios currently have one step, preserving their user targets and request counts. Duration, waits, and timeouts use profile defaults.
 The burst scenario samples normal and staging according to its configured sequence. `pull-through-1k-impulse` combines the former calibrate and short-impulse scenarios; use `-s N` to choose N samples per candidate. `pull-through-1k-impulse-repeated-requests` sends ten copies of the same ordered list of 100 Maven artifacts (1,000 requests total). The request list is repeated; the impulse starts the users together, so completion order is not guaranteed. `tmp` is a draft and is excluded from whole-experiment executions. Pulp volumes are reset before every measurement; generated fixture data remains on disk.
 The `upload-impulse` scenario reuses those JAR files for 100 concurrent multipart POSTs to Maven's synchronous upload endpoint. Each request includes a unique `relative_path`. Staging uploads include the repository so Pulp stages each content unit, then issue one explicit staging commit after all uploads. Normal uploads collect the returned content HREFs and end with one repository modify request that adds them all. HTTP Basic credentials are supplied only at execution time.
+The `pull-through-step-30-users-unique-repeated` scenario uses 30 users and one sample per candidate. It requests 12,000 distinct artifacts, then repeats each one once (24,000 requests total, split 50/50). At the draft rates of 25 unique and 100 repeated requests per second, this would take about eight and two minutes respectively; the repeated rate is unmeasured. Its fixture contains 15,000 artifacts, and the 30-minute duration is a safety limit; the run ends when its request list is exhausted. Requests near the phase boundary may overlap because 30 users are active at once.
 
 ## Candidate sources
 
 The experiment requires `pulpcore` and `pulp_maven`; every candidate supplies a source for each.
 A relative source uses the repository root, so `../pulpcore` and `../pulp_maven` select sibling checkouts.
 A Git URL selects a remote ref; the normal candidate uses `pulp/pulp_maven` at tag `0.37.0`.
-The staging candidate creates its repository with `staging_autocommit=false`; the normal candidate uses Pulp's defaults.
+The upload scenario creates the staging repository with `staging_autocommit=false` and commits explicitly. Pull-through scenarios enable autocommit for staging with a 10-second delay and a 5-second scan interval. The normal candidate uses Pulp's defaults.
 Infrastructure resolves each source, installs it, and starts Pulp before invoking candidate setup.
 
 ## Files
@@ -23,8 +24,8 @@ Infrastructure resolves each source, installs it, and starts Pulp before invokin
 - `compose.yaml` defines Pulp; the runner adds fixture service fragments from required fixture metadata.
 - `Containerfile` builds Pulp with the selected pulpcore and plugin source contexts.
 - `pulp_juicer/collector` supplies a noarch RPM with the s6 collector service. `PulpComponents` discovers API, content, task worker, and PostgreSQL processes through s6, and exposes Pulp's worker temp directories and database connection settings. Periodic collectors write separate Parquet files: timestamps, PostgreSQL process-tree CPU and memory, per-content-worker storage I/O rates (`content_io.parquet`), per-API-worker CPU, PSS memory, and storage I/O rates (`api_worker.parquet`), and Pulp working-directory files and bytes (`pulp_temp.parquet`). The working directory is shared, so its file counts are not attributable to content workers alone. The collector discovers services as root; its PostgreSQL snapshot helper reads proportional set size (PSS) as the `postgres` user, and its worker I/O helper reads process counters as the `pulp` user. Before teardown, the runner requests an on-demand PostgreSQL task snapshot (`tasking.parquet`) through a Unix socket, finalizes periodic Parquet files, and copies them into the run's `collectors/` directory. Compose logs are retained for debugging.
-- `settings/settings.py` applies shared settings and the selected candidate's `pulp_settings`.
-- `candidates.py` defines one setup function per candidate, used by their `PreTestFunction` records. They configure Maven resources using `pulp_juicer.PulpClient`.
+- `settings/settings.py` applies shared settings and the selected scenario's candidate preparation settings.
+- `candidates.py` groups repository setup factories in `NormalCandidate` and `StagingCandidate`. Each scenario's `candidate_config` calls a factory to obtain its pre-test function. They configure Maven resources using `pulp_juicer.PulpClient`.
 - `data_service/compose.yaml` defines the upstream HTTP service.
 - `data_service/fixture.py` implements `MavenServiceFixture.build` and `generate_metadata`.
   Run it as a module to generate a small fixture and print its metadata: `python -m experiments.bucket_repository.data_service.fixture --count 10 --size 1024`.
@@ -43,7 +44,7 @@ The runner then calls `build()` and `generate_metadata()` on that configured ins
 The runner combines the main Compose file with service fragments required by the scenario and mounts fixture output directories.
 The Maven fixture writes its artifact manifest into its output directory; scenario input uses that manifest to select requests.
 
-Each candidate declares a list of `PreTestFunction(description, setup_fn)` records. The runner calls each function after starting Pulp, passing a `PulpConnection`, required fixture metadata by name, and a unique run ID. The returned mappings are combined for the scenario input function.
+Each scenario maps candidate names to `PulpPrepare(description, settings, pre_test_fn)`. The runner applies its settings when starting Pulp and calls its preparation function after startup, passing a `PulpConnection`, required fixture metadata by name, and a unique run ID. The returned mapping is combined with scenario setup output for the input function.
 The Maven setup function uses the library Pulp client to create the remote, repository, and distribution, then returns their references and the distribution base URL.
 The scenario input functions read the required fixture's manifest and select unique paths up to `request_count`. Pull-through uses the `http_get` driver; upload uses `http_upload` with the same artifact files.
 The experiment modules do not import Locust.

@@ -6,13 +6,15 @@ from collections.abc import Mapping
 from pulp_juicer import (
     PulpClient,
     PulpConnection,
+    PulpPreTestFn,
+    FixtureMetadata,
     ServiceFixtureMetadata,
 )
 
 
 def _setup_maven(
     connection: PulpConnection,
-    fixtures: Mapping[str, ServiceFixtureMetadata],
+    fixtures: Mapping[str, FixtureMetadata],
     run_id: str,
     repository_options: Mapping[str, bool],
 ) -> dict:
@@ -22,6 +24,8 @@ def _setup_maven(
         )
     client = PulpClient(connection)
     fixture = fixtures["maven"]
+    if not isinstance(fixture, ServiceFixtureMetadata):
+        raise TypeError("Maven fixture must be a service fixture")
     name = f"loadtest-{run_id}"
     remote = client.wait_for_created_resource(
         client.post(
@@ -57,22 +61,36 @@ def _setup_maven(
     }
 
 
-def setup_normal(
-    connection: PulpConnection,
-    fixtures: Mapping[str, ServiceFixtureMetadata],
-    run_id: str,
-) -> dict:
-    return _setup_maven(connection, fixtures, run_id, {})
+class NormalCandidate:
+    @staticmethod
+    def setup() -> PulpPreTestFn:
+        """Return the standard Maven repository preparation callback."""
+
+        def pre_test_fn(
+            connection: PulpConnection,
+            fixtures: Mapping[str, FixtureMetadata],
+            run_id: str,
+        ) -> dict:
+            return _setup_maven(connection, fixtures, run_id, {})
+
+        return pre_test_fn
 
 
-def setup_staging(
-    connection: PulpConnection,
-    fixtures: Mapping[str, ServiceFixtureMetadata],
-    run_id: str,
-) -> dict:
-    return _setup_maven(
-        connection,
-        fixtures,
-        run_id,
-        {"staging_enabled": True, "staging_autocommit": False},
-    )
+class StagingCandidate:
+    @staticmethod
+    def setup(*, autocommit: bool) -> PulpPreTestFn:
+        """Return a preparation callback for the selected commit policy."""
+
+        def pre_test_fn(
+            connection: PulpConnection,
+            fixtures: Mapping[str, FixtureMetadata],
+            run_id: str,
+        ) -> dict:
+            return _setup_maven(
+                connection,
+                fixtures,
+                run_id,
+                {"staging_enabled": True, "staging_autocommit": autocommit},
+            )
+
+        return pre_test_fn

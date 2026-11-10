@@ -15,6 +15,7 @@ from .types import (
     FixtureMetadata,
     LoadProfile,
     PulpConnection,
+    PulpPrepare,
     ScenarioConfig,
     ServiceFixtureMetadata,
 )
@@ -35,6 +36,7 @@ class RunMetadata:
     input_builder: Callable[..., dict]
     result_dir: Path
     scenario_setup: Callable | None = None
+    pulp_prepare: PulpPrepare | None = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,7 @@ def build_test_plan(
                     input_builder=scenario.input,
                     result_dir=result_dir,
                     scenario_setup=scenario.setup_fn,
+                    pulp_prepare=scenario.candidate_config.get(candidates[entry].name),
                 )
             )
     if not runs:

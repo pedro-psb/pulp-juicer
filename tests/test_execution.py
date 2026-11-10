@@ -12,6 +12,7 @@ from pulp_juicer.compose_runtime import ComposeRuntime
 from pulp_juicer.execution import _write_run_context, execute_test_plan
 from pulp_juicer.plan import RunMetadata, RunResultMetadata
 from pulp_juicer.types import (
+    PulpPrepare,
     PreTestFunction,
     PulpConnection,
     ServiceFixtureMetadata,
@@ -58,6 +59,7 @@ class TestExecution(unittest.TestCase):
                 pre_test_functions=[],
                 pulp_settings={},
             )
+            prepare_fn = Mock(return_value={"prepared": "scenario-specific"})
             run = RunMetadata(
                 "smoke",
                 "upload",
@@ -72,6 +74,11 @@ class TestExecution(unittest.TestCase):
                     "requests": [{"path": "pulp/api/v3/content/maven/artifact/"}],
                 },
                 output,
+                pulp_prepare=PulpPrepare(
+                    description="Prepare upload repository",
+                    settings={},
+                    pre_test_fn=prepare_fn,
+                ),
             )
             plan = SimpleNamespace(
                 execution_id="smoke__upload__001",
@@ -106,6 +113,10 @@ class TestExecution(unittest.TestCase):
                 execute_test_plan(plan)
             self.assertEqual(observed["auth"], ("admin", "test-secret"))
             self.assertNotIn("auth", write_context.call_args.args[2])
+            prepare_fn.assert_called_once()
+            self.assertEqual(
+                write_context.call_args.args[2]["prepared"], "scenario-specific"
+            )
 
     def test_post_debug_keeps_services_after_success_or_test_failure(self):
         for fail in (False, True):

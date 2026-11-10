@@ -37,15 +37,15 @@ class TestVersionRetention(unittest.TestCase):
             "experiments.version_retention.scenario.PulpClient", return_value=client
         ):
             first = (
-                EXPERIMENT.candidates[0]
-                .pre_test_functions[0]
-                .setup_fn(PulpConnection(), {}, "run001-retain-one")
+                EXPERIMENT.scenarios[0]
+                .candidate_config["retain-one"]
+                .pre_test_fn(PulpConnection(), {}, "run001-retain-one")
             )
             first_payload = client.post.call_args.args[1]
             second = (
-                EXPERIMENT.candidates[1]
-                .pre_test_functions[0]
-                .setup_fn(PulpConnection(), {}, "run002-unlimited")
+                EXPERIMENT.scenarios[0]
+                .candidate_config["unlimited"]
+                .pre_test_fn(PulpConnection(), {}, "run002-unlimited")
             )
             second_payload = client.post.call_args.args[1]
         self.assertEqual(first_payload["retain_repo_versions"], 1)

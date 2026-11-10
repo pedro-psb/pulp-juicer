@@ -51,7 +51,10 @@ def _compose_inputs(plan: TestPlanMetadata, run: RunMetadata):
             json.dumps({"services": {"pulp": {"volumes": mounts}}}, indent=2) + "\n"
         )
         files.append(override)
-    pulp_settings = getattr(run.candidate, "pulp_settings", {})
+    prepare = getattr(run, "pulp_prepare", None)
+    pulp_settings = (
+        prepare.settings if prepare else getattr(run.candidate, "pulp_settings", {})
+    )
     if pulp_settings:
         override = (
             plan.results_dir
@@ -65,7 +68,9 @@ def _compose_inputs(plan: TestPlanMetadata, run: RunMetadata):
                     "services": {
                         "pulp": {
                             "environment": {
-                                "JUICER_PULP_SETTINGS_JSON": json.dumps(pulp_settings)
+                                "JUICER_PULP_SETTINGS_JSON": json.dumps(
+                                    dict(pulp_settings)
+                                )
                             }
                         }
                     }
@@ -99,6 +104,7 @@ def _write_run_context(
         if manifest
         else "",
     }
+    prepare = getattr(run, "pulp_prepare", None)
     metadata = {
         "experiment": run.experiment_id,
         "execution_id": execution_id,
@@ -106,10 +112,14 @@ def _write_run_context(
         "scenario": run.scenario_id,
         "candidate": run.candidate.name,
         "candidate_id": run.candidate.id,
-        "pre_test_functions": [
-            hook.description for hook in run.candidate.pre_test_functions
-        ],
-        "pulp_settings": dict(getattr(run.candidate, "pulp_settings", {})),
+        "pre_test_functions": (
+            [prepare.description]
+            if prepare
+            else [hook.description for hook in run.candidate.pre_test_functions]
+        ),
+        "pulp_settings": dict(
+            prepare.settings if prepare else getattr(run.candidate, "pulp_settings", {})
+        ),
         "fixture": fixture_info,
         "load": {
             "profile": type(run.load).__name__,
@@ -244,18 +254,29 @@ def execute_test_plan(
                     f"{run.scenario_id}-{run.run_id}-{run.candidate.name}"
                 )
                 candidate_data = {}
-                for hook in run.candidate.pre_test_functions:
+                prepare = getattr(run, "pulp_prepare", None)
+                if prepare is not None:
                     if on_progress:
-                        on_progress(f"Pre-test: {hook.description}")
-                    output = hook.setup_fn(
+                        on_progress(f"Pre-test: {prepare.description}")
+                    output = prepare.pre_test_fn(
                         plan.pulp_connection, run.fixtures, candidate_run_id
                     )
                     if output is not None:
                         candidate_data.update(output)
-                if run.scenario_setup is not None:
+                else:
+                    for hook in run.candidate.pre_test_functions:
+                        if on_progress:
+                            on_progress(f"Pre-test: {hook.description}")
+                        output = hook.setup_fn(
+                            plan.pulp_connection, run.fixtures, candidate_run_id
+                        )
+                        if output is not None:
+                            candidate_data.update(output)
+                scenario_setup = getattr(run, "scenario_setup", None)
+                if scenario_setup is not None:
                     if on_progress:
                         on_progress(f"Pre-test: seed {run.scenario_id}")
-                    output = run.scenario_setup(
+                    output = scenario_setup(
                         plan.pulp_connection, run.fixtures, candidate_run_id, runtime
                     )
                     if output is not None:

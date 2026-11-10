@@ -17,7 +17,7 @@ from .types import (
     VolumeFixtureMetadata,
 )
 
-VERSION = 11
+VERSION = 12
 
 
 def _unit(run: RunMetadata) -> dict:
@@ -37,6 +37,14 @@ def _unit(run: RunMetadata) -> dict:
                 hook.description for hook in run.candidate.pre_test_functions
             ],
         },
+        "pulp_prepare": (
+            {
+                "description": run.pulp_prepare.description,
+                "settings": dict(run.pulp_prepare.settings),
+            }
+            if run.pulp_prepare
+            else None
+        ),
         "fixtures": fixtures,
         "fixture_builds": [
             {"class": type(item).__name__, **vars(item)} for item in run.fixture_builds
@@ -103,6 +111,7 @@ def _hydrate_run(
     candidates,
     input_builder,
     scenario_setup=None,
+    candidate_config=None,
 ) -> RunMetadata:
     candidate_data = dict(unit["candidate"])
     candidate_id = candidate_data["id"]
@@ -115,6 +124,15 @@ def _hydrate_run(
         raise ValueError(f"Pre-test functions changed for candidate {candidate_id}")
     candidate = replace(candidates[candidate_id], **candidate_data)
     experiment.validate_candidate_sources(candidate)
+    saved_prepare = unit.get("pulp_prepare")
+    prepare = (candidate_config or {}).get(candidate.name)
+    if saved_prepare is None:
+        if prepare is not None:
+            raise ValueError(f"Pulp preparation changed for candidate {candidate_id}")
+    elif prepare is None or saved_prepare["description"] != prepare.description:
+        raise ValueError(f"Pulp preparation changed for candidate {candidate_id}")
+    else:
+        prepare = replace(prepare, settings=saved_prepare["settings"])
     fixtures = {}
     for name, data in unit["fixtures"].items():
         values = {key: value for key, value in data.items() if key != "kind"}
@@ -156,6 +174,7 @@ def _hydrate_run(
         input_builder=input_builder,
         result_dir=Path(unit["result_dir"]),
         scenario_setup=scenario_setup,
+        pulp_prepare=prepare,
     )
 
 
@@ -207,6 +226,7 @@ def load_plan_file(
                         candidates,
                         scenarios[current_id].input,
                         scenarios[current_id].setup_fn,
+                        scenarios[current_id].candidate_config,
                     )
                 )
     if scenario_id is not None and scenario_id not in seen_scenarios:

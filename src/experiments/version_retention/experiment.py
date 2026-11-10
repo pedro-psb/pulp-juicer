@@ -4,7 +4,7 @@ from pulp_juicer import (
     CandidateConfig,
     ExperimentConfig,
     LoadStep,
-    PreTestFunction,
+    PulpPrepare,
     ScenarioConfig,
     StepFunctionLoad,
 )
@@ -35,24 +35,12 @@ EXPERIMENT = ExperimentConfig(
             name="retain-one",
             description="Upstream pulpcore 3.123.1; retain_repo_versions=1.",
             sources={"pulpcore": "https://github.com/pulp/pulpcore.git#3.123.1"},
-            pre_test_functions=[
-                PreTestFunction(
-                    description="Create file repository with retain_repo_versions=1",
-                    setup_fn=create_repository_retain_one,
-                )
-            ],
         ),
         CandidateConfig(
             id=2,
             name="unlimited",
             description="Upstream pulpcore 3.123.1; default unlimited version retention.",
             sources={"pulpcore": "https://github.com/pulp/pulpcore.git#3.123.1"},
-            pre_test_functions=[
-                PreTestFunction(
-                    description="Create file repository with default version retention",
-                    setup_fn=create_repository_unlimited,
-                )
-            ],
         ),
     ),
     scenarios=(
@@ -65,6 +53,18 @@ EXPERIMENT = ExperimentConfig(
             load=LOAD,
             setup_fn=seed_sql,
             selected_stats=("task_execution", "pg_cpu", "pg_cpu_seconds"),
+            candidate_config={
+                "retain-one": PulpPrepare(
+                    description="Create file repository with retain_repo_versions=1",
+                    settings={},
+                    pre_test_fn=create_repository_retain_one,
+                ),
+                "unlimited": PulpPrepare(
+                    description="Create file repository with default version retention",
+                    settings={},
+                    pre_test_fn=create_repository_unlimited,
+                ),
+            },
         ),
     ),
 )

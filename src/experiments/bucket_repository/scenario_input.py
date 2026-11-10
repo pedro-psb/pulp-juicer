@@ -5,6 +5,9 @@ from collections.abc import Mapping
 
 from pulp_juicer import ServiceFixtureMetadata, StepFunctionLoad, UnitaryImpulseLoad
 
+LONG_STEP_UNIQUE_COUNT = 12_000
+LONG_STEP_REPEAT_ROUNDS = 1
+
 
 def build_pull_through(
     fixtures: Mapping[str, ServiceFixtureMetadata],
@@ -64,6 +67,44 @@ def build_pull_through_repeated(
                 "sha256": artifact["sha256"],
             }
             for _ in range(10)
+            for artifact in artifacts
+        ],
+        "wait_seconds": load.wait_seconds,
+        "request_timeout_seconds": load.request_timeout_seconds,
+    }
+
+
+def build_pull_through_unique_then_repeated(
+    fixtures: Mapping[str, ServiceFixtureMetadata],
+    candidate: dict,
+    load: StepFunctionLoad,
+) -> dict:
+    """Request unique artifacts first, then repeat each one once."""
+    expected_count = LONG_STEP_UNIQUE_COUNT * (1 + LONG_STEP_REPEAT_ROUNDS)
+    if load.request_count != expected_count:
+        raise ValueError(
+            f"Unique/repeated pull-through needs {expected_count} requests"
+        )
+    fixture = fixtures["maven"]
+    manifest = json.loads((fixture.output_dir / "manifest.json").read_text())
+    artifacts = manifest["artifacts"][:LONG_STEP_UNIQUE_COUNT]
+    if (
+        len(artifacts) != LONG_STEP_UNIQUE_COUNT
+        or len({artifact["path"] for artifact in artifacts}) != LONG_STEP_UNIQUE_COUNT
+    ):
+        raise ValueError(
+            f"Unique/repeated pull-through needs {LONG_STEP_UNIQUE_COUNT} unique artifacts"
+        )
+    return {
+        "base_url": candidate["base_url"].rstrip("/"),
+        "requests": [
+            {
+                "path": artifact["path"],
+                "name": "bucket-repository",
+                "expected_status": 200,
+                "sha256": artifact["sha256"],
+            }
+            for _ in range(1 + LONG_STEP_REPEAT_ROUNDS)
             for artifact in artifacts
         ],
         "wait_seconds": load.wait_seconds,

@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,15 @@ class VolumeFixtureMetadata:
 FixtureMetadata = ServiceFixtureMetadata | VolumeFixtureMetadata
 
 
+class PulpPreTestFn(Protocol):
+    def __call__(
+        self,
+        connection: PulpConnection,
+        fixtures: Mapping[str, FixtureMetadata],
+        run_id: str,
+    ) -> Mapping[str, Any] | None: ...
+
+
 class Fixture(ABC):
     def __init__(self, name: str, output_dir: Path):
         self.name = name
@@ -65,11 +74,27 @@ class VolumeFixture(Fixture, ABC):
 
 
 @dataclass(frozen=True)
-class PreTestFunction:
+class PulpPrepare:
     description: str
-    setup_fn: Callable[
-        [PulpConnection, Mapping[str, FixtureMetadata], str], Mapping[str, Any] | None
-    ]
+    settings: Mapping[str, Any]
+    pre_test_fn: PulpPreTestFn
+
+    def __post_init__(self):
+        for name in self.settings:
+            if (
+                not isinstance(name, str)
+                or not name.isidentifier()
+                or not name.isupper()
+            ):
+                raise ValueError(f"Invalid Pulp setting name: {name!r}")
+
+
+@dataclass(frozen=True)
+class PreTestFunction:
+    """Legacy candidate-wide preparation; prefer scenario PulpPrepare entries."""
+
+    description: str
+    setup_fn: PulpPreTestFn
 
 
 @dataclass(frozen=True)
@@ -78,7 +103,7 @@ class CandidateConfig:
     name: str
     description: str
     sources: Mapping[str, str]
-    pre_test_functions: list[PreTestFunction]
+    pre_test_functions: list[PreTestFunction] = field(default_factory=list)
     pulp_settings: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -166,6 +191,7 @@ class ScenarioConfig:
     draft: bool = False
     selected_stats: Sequence[str] = ()
     setup_fn: Callable[..., Mapping[str, Any] | None] | None = None
+    candidate_config: Mapping[str, PulpPrepare] = field(default_factory=dict)
 
     def __post_init__(self):
         if (
@@ -183,6 +209,16 @@ class ScenarioConfig:
         if len(set(self.selected_stats)) != len(self.selected_stats):
             raise ValueError("Scenario selected_stats must not contain duplicates")
         object.__setattr__(self, "selected_stats", tuple(self.selected_stats))
+        if any(
+            not isinstance(candidate_name, str) or not candidate_name
+            for candidate_name in self.candidate_config
+        ):
+            raise ValueError("Scenario candidate_config keys must be candidate names")
+        if any(
+            not isinstance(prepare, PulpPrepare)
+            for prepare in self.candidate_config.values()
+        ):
+            raise ValueError("Scenario candidate_config values must be PulpPrepare")
 
 
 @dataclass(frozen=True)
@@ -205,6 +241,23 @@ class ExperimentConfig:
                 raise ValueError(f"Invalid source name: {name!r}")
         for candidate in self.candidates:
             self.validate_candidate_sources(candidate)
+        candidate_names = {candidate.name for candidate in self.candidates}
+        if len(candidate_names) != len(self.candidates):
+            raise ValueError("Candidate names must be unique")
+        for scenario in self.scenarios:
+            unknown = set(scenario.candidate_config) - candidate_names
+            if unknown:
+                raise ValueError(
+                    f"Unknown candidate names in {scenario.id} candidate_config: {sorted(unknown)}"
+                )
+            if (
+                scenario.candidate_config
+                and set(scenario.candidate_config) != candidate_names
+            ):
+                missing = candidate_names - set(scenario.candidate_config)
+                raise ValueError(
+                    f"Missing candidate names in {scenario.id} candidate_config: {sorted(missing)}"
+                )
 
     def validate_candidate_sources(self, candidate: CandidateConfig):
         required = set(self.required_sources)

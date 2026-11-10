@@ -6,7 +6,7 @@ from pulp_juicer import (
     CandidateConfig,
     ExperimentConfig,
     LoadStep,
-    PreTestFunction,
+    PulpPrepare,
     RequireFixture,
     ScenarioConfig,
     StepFunctionLoad,
@@ -14,7 +14,8 @@ from pulp_juicer import (
     sample_sequence,
 )
 
-from . import candidates, scenario_input
+from . import scenario_input
+from .candidates import NormalCandidate, StagingCandidate
 from .data_service.fixture import MavenServiceFixture
 
 # Variable keys come from summary_statistics.VARIABLES; trial_phases selects a transposed table.
@@ -54,12 +55,6 @@ EXPERIMENT = ExperimentConfig(
                 "pulpcore": "https://github.com/pulp/pulpcore.git#3.123.1",
                 "pulp_maven": "https://github.com/pulp/pulp_maven.git#0.37.0",
             },
-            pre_test_functions=[
-                PreTestFunction(
-                    description="Create Maven remote, repository, and distribution",
-                    setup_fn=candidates.setup_normal,
-                )
-            ],
         ),
         CandidateConfig(
             id=2,
@@ -69,12 +64,6 @@ EXPERIMENT = ExperimentConfig(
                 "pulpcore": "../pulpcore",
                 "pulp_maven": "../pulp_maven",
             },
-            pre_test_functions=[
-                PreTestFunction(
-                    description="Create staging Maven remote, repository, and distribution",
-                    setup_fn=candidates.setup_staging,
-                )
-            ],
         ),
     ),
     scenarios=(
@@ -89,6 +78,21 @@ EXPERIMENT = ExperimentConfig(
             run_order=sample_sequence(n=3, candidates=(1, 2)),
             load=UnitaryImpulseLoad(request_count=1000),
             selected_stats=SELECTED_STATS,
+            candidate_config={
+                "normal": PulpPrepare(
+                    description="Create Maven remote, repository, and distribution",
+                    settings={},
+                    pre_test_fn=NormalCandidate.setup(),
+                ),
+                "staging": PulpPrepare(
+                    description="Create staging Maven repository with autocommit",
+                    settings={
+                        "STAGING_AUTOCOMMIT_DELAY_SECONDS": 10,
+                        "STAGING_AUTOCOMMIT_SCAN_INTERVAL_SECONDS": 5,
+                    },
+                    pre_test_fn=StagingCandidate.setup(autocommit=True),
+                ),
+            },
         ),
         ScenarioConfig(
             id="pull-through-1k-impulse-repeated-requests",
@@ -101,6 +105,21 @@ EXPERIMENT = ExperimentConfig(
             run_order=sample_sequence(n=3, candidates=(1, 2)),
             load=UnitaryImpulseLoad(request_count=1000),
             selected_stats=SELECTED_STATS,
+            candidate_config={
+                "normal": PulpPrepare(
+                    description="Create Maven remote, repository, and distribution",
+                    settings={},
+                    pre_test_fn=NormalCandidate.setup(),
+                ),
+                "staging": PulpPrepare(
+                    description="Create staging Maven repository with autocommit",
+                    settings={
+                        "STAGING_AUTOCOMMIT_DELAY_SECONDS": 10,
+                        "STAGING_AUTOCOMMIT_SCAN_INTERVAL_SECONDS": 5,
+                    },
+                    pre_test_fn=StagingCandidate.setup(autocommit=True),
+                ),
+            },
         ),
         ScenarioConfig(
             id="pull-through-step-30-users",
@@ -116,6 +135,56 @@ EXPERIMENT = ExperimentConfig(
                 request_count=650,
             ),
             selected_stats=SELECTED_STATS,
+            candidate_config={
+                "normal": PulpPrepare(
+                    description="Create Maven remote, repository, and distribution",
+                    settings={},
+                    pre_test_fn=NormalCandidate.setup(),
+                ),
+                "staging": PulpPrepare(
+                    description="Create staging Maven repository with autocommit",
+                    settings={
+                        "STAGING_AUTOCOMMIT_DELAY_SECONDS": 10,
+                        "STAGING_AUTOCOMMIT_SCAN_INTERVAL_SECONDS": 5,
+                    },
+                    pre_test_fn=StagingCandidate.setup(autocommit=True),
+                ),
+            },
+        ),
+        ScenarioConfig(
+            id="pull-through-step-30-users-unique-repeated",
+            description=(
+                "Thirty users request 12,000 unique Maven artifacts, then repeat "
+                "the same set once."
+            ),
+            driver="http_get",
+            requires=(
+                RequireFixture(name="maven", args={"count": 15000, "size": 65536}),
+            ),
+            input=scenario_input.build_pull_through_unique_then_repeated,
+            run_order=sample_sequence(n=1, candidates=(1, 2)),
+            load=StepFunctionLoad(
+                steps=(LoadStep(at_seconds=0, users=30),),
+                request_count=scenario_input.LONG_STEP_UNIQUE_COUNT
+                * (1 + scenario_input.LONG_STEP_REPEAT_ROUNDS),
+                max_duration="30m",
+            ),
+            selected_stats=SELECTED_STATS,
+            candidate_config={
+                "normal": PulpPrepare(
+                    description="Create Maven remote, repository, and distribution",
+                    settings={},
+                    pre_test_fn=NormalCandidate.setup(),
+                ),
+                "staging": PulpPrepare(
+                    description="Create staging Maven repository with autocommit",
+                    settings={
+                        "STAGING_AUTOCOMMIT_DELAY_SECONDS": 10,
+                        "STAGING_AUTOCOMMIT_SCAN_INTERVAL_SECONDS": 5,
+                    },
+                    pre_test_fn=StagingCandidate.setup(autocommit=True),
+                ),
+            },
         ),
         ScenarioConfig(
             id="upload-impulse",
@@ -128,6 +197,18 @@ EXPERIMENT = ExperimentConfig(
             run_order=sample_sequence(n=3, candidates=(1, 2)),
             load=UnitaryImpulseLoad(request_count=100),
             selected_stats=SELECTED_STATS,
+            candidate_config={
+                "normal": PulpPrepare(
+                    description="Create Maven remote, repository, and distribution",
+                    settings={},
+                    pre_test_fn=NormalCandidate.setup(),
+                ),
+                "staging": PulpPrepare(
+                    description="Create staging Maven repository without autocommit",
+                    settings={},
+                    pre_test_fn=StagingCandidate.setup(autocommit=False),
+                ),
+            },
         ),
         ScenarioConfig(
             id="tmp",
@@ -144,6 +225,21 @@ EXPERIMENT = ExperimentConfig(
                 request_count=120,
             ),
             selected_stats=SELECTED_STATS,
+            candidate_config={
+                "normal": PulpPrepare(
+                    description="Create Maven remote, repository, and distribution",
+                    settings={},
+                    pre_test_fn=NormalCandidate.setup(),
+                ),
+                "staging": PulpPrepare(
+                    description="Create staging Maven repository with autocommit",
+                    settings={
+                        "STAGING_AUTOCOMMIT_DELAY_SECONDS": 10,
+                        "STAGING_AUTOCOMMIT_SCAN_INTERVAL_SECONDS": 5,
+                    },
+                    pre_test_fn=StagingCandidate.setup(autocommit=True),
+                ),
+            },
         ),
     ),
 )
